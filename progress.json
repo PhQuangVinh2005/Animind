@@ -1,20 +1,34 @@
 {
-  "feature": "project-scaffolding",
-  "stage": "folder-structure-created",
-  "day": 0,
-  "last_success": "plan_v2 approved, AGENTS.md written",
-  "next_step": "Day 1: Docker setup + AniList data fetch + embedding ingestion",
+  "feature": "day1-docker-setup",
+  "stage": "docker-containers-verified",
+  "day": 1,
+  "last_success": "Qdrant v1.17.1 + vLLM v0.19.1 reranker both healthy, /health returns 200",
+  "next_step": "Day 1b: Implement scripts/fetch_anilist.py — AniList GraphQL pagination, ~20k records → data/raw/anime.json",
   "open_questions": [],
   "completed": [
     "plan_v1 drafted and reviewed",
     "plan_v2 with reranker, RAGAS eval, Cloudflare Tunnel, Vercel",
     "AGENTS.md created",
-    "project folder structure scaffolded"
+    "project folder structure scaffolded",
+    "Docker daemon started + NVIDIA Container Toolkit installed",
+    "docker-compose.yml production-ready: pinned versions, health checks, resource limits, named volumes, log rotation",
+    "Qdrant v1.17.1 container running (:6333/:6334)",
+    "vLLM v0.19.1 reranker container running (:8001) with Qwen3-Reranker-0.6B",
+    "Key fix: vLLM v0.19.1 uses ENTRYPOINT=['vllm','serve'], --task replaced with --runner pooling"
   ],
   "context_pointers": [
     "plan_v2.md",
     "AGENTS.md",
+    "docker-compose.yml",
     "docs/decisions/technical_decisions.md",
     "docs/patterns/code_patterns.md"
-  ]
+  ],
+  "docker_notes": {
+    "start": "cd ~/misa/Animind && docker compose up -d",
+    "stop": "cd ~/misa/Animind && docker compose down",
+    "logs": "docker compose logs -f",
+    "verify_qdrant": "curl -s http://localhost:6333/healthz",
+    "verify_reranker": "curl -s http://localhost:8001/health",
+    "test_rerank": "curl -s http://localhost:8001/v1/rerank -H 'Content-Type: application/json' -d '{\"model\":\"Qwen/Qwen3-Reranker-0.6B\",\"query\":\"best action anime\",\"documents\":[\"Naruto is a popular action anime\",\"Cooking recipes\"]}'"
+  }
 }

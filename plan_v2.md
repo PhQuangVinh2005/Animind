@@ -79,17 +79,26 @@
 - vLLM reranker chạy tại `:8001`
 
 **vLLM Reranker setup:**
-```bash
-# docker-compose.yml snippet
+```yaml
+# docker-compose.yml snippet (vLLM v0.19.1)
+# NOTE: Image ENTRYPOINT=["vllm","serve"], so command = args to "vllm serve"
+# NOTE: --task removed in v0.19, replaced with --runner pooling
 reranker:
-  image: vllm/vllm-openai:latest
-  command: >
-    --model Qwen/Qwen3-Reranker-0.6B
-    --host 0.0.0.0 --port 8001
-    --task score
-    --gpu-memory-utilization 0.15
-    --hf_overrides '{"architectures":["Qwen3ForSequenceClassification"],
-      "classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}'
+  image: vllm/vllm-openai:v0.19.1
+  command:
+    - "Qwen/Qwen3-Reranker-0.6B"
+    - "--host"
+    - "0.0.0.0"
+    - "--port"
+    - "8001"
+    - "--runner"
+    - "pooling"
+    - "--gpu-memory-utilization"
+    - "0.15"
+    - "--max-model-len"
+    - "512"
+    - "--hf_overrides"
+    - '{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}'
   deploy:
     resources:
       reservations:
@@ -288,24 +297,31 @@ results_without_reranker = evaluate(...)
 
 **Docker Compose cuối cùng:**
 ```yaml
+# See docker-compose.yml for full production config with health checks,
+# resource limits, named volumes, and log rotation.
 services:
   qdrant:
-    image: qdrant/qdrant
-    ports: ["6333:6333"]
-    volumes: ["./qdrant_data:/qdrant/storage"]
+    image: qdrant/qdrant:v1.17.1
+    ports: ["6333:6333", "6334:6334"]
+    volumes: [qdrant_data:/qdrant/storage]
 
   reranker:
-    image: vllm/vllm-openai:latest
-    command: >
-      --model Qwen/Qwen3-Reranker-0.6B
-      --port 8001 --task score
-      --gpu-memory-utilization 0.15
-      --hf_overrides '{"architectures":["Qwen3ForSequenceClassification"],
-        "classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}'
+    image: vllm/vllm-openai:v0.19.1
+    # ENTRYPOINT=["vllm","serve"], --task→--runner pooling in v0.19
+    command:
+      - "Qwen/Qwen3-Reranker-0.6B"
+      - "--port"
+      - "8001"
+      - "--runner"
+      - "pooling"
+      - "--gpu-memory-utilization"
+      - "0.15"
+      - "--hf_overrides"
+      - '{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}'
     deploy:
       resources:
         reservations:
-          devices: [{capabilities: [gpu]}]
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
 
   backend:
     build: ./backend
@@ -318,6 +334,10 @@ services:
     command: tunnel run animind
     volumes: ["./cloudflared:/etc/cloudflared"]
     depends_on: [backend]
+
+volumes:
+  qdrant_data:
+  huggingface_cache:
 ```
 
 **Deliverables:**

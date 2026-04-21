@@ -49,3 +49,23 @@
 - **Decision:** Use SQLite for LangGraph state persistence
 - **Reason:** Zero config, single-file, sufficient for single-user demo
 - **Trade-off:** Not suitable for multi-user production, but that's a non-goal
+
+## D11: Pin Docker Image Versions
+- **Decision:** Pin `qdrant:v1.17.1` and `vllm-openai:v0.19.1` instead of `latest`
+- **Reason:** Reproducible builds, avoid breaking changes on pull
+- **Trade-off:** Must manually bump versions for updates
+
+## D12: vLLM v0.19.1 CLI Changes
+- **Decision:** Use `--runner pooling` instead of `--task score`, list-form command in compose
+- **Reason:** vLLM v0.19.1 breaking changes:
+  1. Entrypoint changed to `["vllm", "serve"]` — `serve` must NOT be in command
+  2. `--task` flag removed, replaced with `--runner pooling` for scoring/reranking
+  3. `--model` deprecated as flag, model is now a positional argument
+- **Trade-off:** Docs/tutorials online still reference old `--task score` syntax
+- **Gotcha:** YAML `>` block scalar with JSON `--hf_overrides` causes escaping issues — use list-form command instead
+
+## D13: Named Docker Volumes > Bind Mounts
+- **Decision:** Use named volumes (`qdrant_data`, `huggingface_cache`) instead of bind mounts (`./qdrant_data`)
+- **Reason:** Docker-managed, portable, avoids permission issues, HF cache persists model weights across restarts
+- **Trade-off:** Slightly harder to inspect directly (use `docker volume inspect`)
+
