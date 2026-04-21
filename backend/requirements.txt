@@ -1,0 +1,28 @@
+# Backend
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+httpx>=0.28.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.0
+loguru>=0.7.0
+
+# LangChain + LangGraph
+langchain>=0.3.0
+langchain-openai>=0.3.0
+langchain-qdrant>=0.2.0
+langgraph>=0.3.0
+langgraph-checkpoint-sqlite>=2.0.0
+
+# Vector DB
+qdrant-client>=1.12.0
+
+# OpenAI
+openai>=1.60.0
+
+# SSE
+sse-starlette>=2.0.0
+
+# Evaluation
+ragas>=0.2.0
+datasets>=3.0.0
