@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     anilist_client_secret: str = ""
     anilist_access_token: str = ""   # optional — only for user-specific endpoints
 
+    # LangGraph agent
+    agent_db_path: str = "agent_state.db"  # SQLite for conversation checkpoints
+
     # CORS
     frontend_url: str = "http://localhost:3000"
 

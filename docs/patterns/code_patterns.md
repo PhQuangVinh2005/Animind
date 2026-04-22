@@ -297,3 +297,135 @@ async def retrieve(query):
     qdrant = QdrantClient(url=settings.qdrant_url)  # KHÔNG làm thế này
     ...
 ```
+
+---
+
+## ✅ DO: LangGraph node factory pattern (dependency injection)
+```python
+# nodes.py — bind oai_client via closure, not global state
+def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
+    async def router_node(state: AgentState) -> dict:
+        # oai_client available via closure
+        resp = await oai_client.chat.completions.create(...)
+        return {"intent": intent}
+
+    async def rag_node(state: AgentState) -> dict:
+        # all nodes share the same client instance
+        ...
+
+    return {"router": router_node, "rag": rag_node, ...}
+
+# graph.py — build once at startup
+def build_graph(oai_client: AsyncOpenAI, checkpointer=None) -> CompiledStateGraph:
+    if checkpointer is None:
+        checkpointer = InMemorySaver()
+    nodes = make_nodes(oai_client)
+    graph = StateGraph(AgentState)
+    graph.add_node("router", nodes["router"])
+    # ...
+    return graph.compile(checkpointer=checkpointer)
+```
+
+## ❌ DON'T: Instantiate AsyncOpenAI inside each node (wastes connections)
+```python
+# KHÔNG làm thế này
+async def router_node(state: AgentState) -> dict:
+    oai = AsyncOpenAI(api_key=...)  # new client per call!
+    ...
+```
+
+---
+
+## ✅ DO: Conditional edges for intent routing
+```python
+def _route_by_intent(state: AgentState) -> str:
+    intent = state.get("intent", "qa")
+    if intent in ("search", "detail"):
+        return "tool"
+    return "rag"
+
+graph.add_conditional_edges(
+    "router",
+    _route_by_intent,
+    {"rag": "rag", "tool": "tool"},
+)
+```
+
+## ❌ DON'T: Use if/else inside a single mega-node (not inspectable)
+```python
+# KHÔNG làm thế này — loses LangGraph observability
+async def mega_node(state):
+    if state["intent"] == "qa":
+        ...retrieve + rerank + generate...
+    elif state["intent"] == "search":
+        ...
+```
+
+---
+
+## ✅ DO: Inject conversation history into synthesizer LLM call
+```python
+def _trim_and_format_history(messages: list, max_turns: int = 5) -> list[dict]:
+    """Convert LangGraph messages → OpenAI dicts, last N pairs only."""
+    oai_msgs = []
+    for msg in messages[:-1]:  # exclude current user message
+        if isinstance(msg, HumanMessage):
+            oai_msgs.append({"role": "user", "content": msg.content or ""})
+        elif isinstance(msg, AIMessage):
+            oai_msgs.append({"role": "assistant", "content": msg.content or ""})
+    return oai_msgs[-(max_turns * 2):]
+
+# In synthesizer_node:
+history = _trim_and_format_history(state["messages"], max_turns=5)
+messages_payload = [
+    {"role": "system", "content": _SYSTEM_PROMPT},
+    *history,                          # last 5 turn-pairs (10 msgs max)
+    {"role": "user", "content": user_message_with_rag_context},
+]
+```
+
+---
+
+## ✅ DO: Contextualize follow-up queries before retrieval
+```python
+# "what about its score?" + history → "Vinland Saga score episode count"
+contextualized = await _contextualize_query(
+    current_query=_last_user_text(state),
+    messages=state["messages"],
+    oai_client=oai_client,
+)
+# Then use contextualized for filters + rewrite + retrieve
+```
+
+## ❌ DON'T: Feed raw follow-up messages directly to the retriever
+```python
+# KHÔNG làm thế này — loses context, retrieval fails on follow-ups
+query = _last_user_text(state)  # "what about its score?" — meaningless standalone
+candidates = await retrieve(query, oai_client)
+```
+
+---
+
+## ✅ DO: Invoke the agent with thread_id for multi-turn
+```python
+from langchain_core.messages import HumanMessage
+from app.agent.graph import build_graph
+from app.openai_client import make_openai_client
+
+agent = build_graph(make_openai_client())
+
+# Same thread_id = same conversation (checkpointer restores state)
+cfg = {"configurable": {"thread_id": "user-session-uuid"}}
+
+result = await agent.ainvoke(
+    {"messages": [HumanMessage(content="best action anime 2023")]},
+    config=cfg,
+)
+print(result["intent"], result["final_answer"])
+```
+
+## ❌ DON'T: Forget thread_id (every message starts a fresh conversation)
+```python
+# KHÔNG làm thế này — no memory, each call is isolated
+result = await agent.ainvoke({"messages": [HumanMessage(content=query)]})
+```

@@ -1,10 +1,13 @@
 {
-  "feature": "day2-rag-pipeline-complete",
-  "stage": "rag-pipeline-complete-ready-for-day3",
-  "day": 2,
-  "last_success": "Day 2 full RAG pipeline implemented and tested. retrieve→rerank→generate working. Auto-filter extraction, few-shot query rewriting, citation-format system prompt all verified.",
-  "next_step": "Day 3: LangGraph Agent — implement state.py, nodes.py, tools.py, graph.py. Build router_node (intent classify), rag_node, tool_node, synthesizer_node.",
-  "open_questions": [],
+  "feature": "day3-langgraph-agent-complete",
+  "stage": "agent-complete-ready-for-day4",
+  "day": 3,
+  "last_success": "Day 3 LangGraph agent implemented and tested. Router classifies intent, rag+rerank+synthesize path working, tool path (search/detail) working, multi-turn contextual query reformulation implemented.",
+  "next_step": "Day 4: FastAPI endpoints — POST /chat, GET /chat/stream (SSE via astream_events), GET /health. Wire AsyncSqliteSaver via lifespan. Expose via Cloudflare Tunnel.",
+  "open_questions": [
+    "Memory test results pending — test `what about its score?` follow-up with new history-injection fix",
+    "SQLite persistence wired in Day 4 FastAPI lifespan (AsyncSqliteSaver)"
+  ],
   "completed": [
     "plan_v1 drafted and reviewed",
     "plan_v2 with reranker, RAGAS eval, Cloudflare Tunnel, Vercel",
@@ -14,36 +17,40 @@
     "docker-compose.yml production-ready: pinned versions, health checks, resource limits, named volumes, log rotation",
     "Qdrant v1.17.1 container running (:6333/:6334)",
     "vLLM v0.19.1 reranker container running (:8001) with Qwen3-Reranker-0.6B",
-    "Key fix: vLLM v0.19.1 uses ENTRYPOINT=['vllm','serve'], --task replaced with --runner pooling",
     "fetch_anilist.py expanded: 39 fields, interrupt-safe checkpointing",
     "anime.json fetched: 1250 records, 6.2MB",
-    "app/config.py: switched to SHOPAIKEY_* provider (OpenAI-compatible, requires User-Agent header)",
-    "app/openai_client.py: make_openai_client() factory with browser User-Agent for ShopAIKey",
-    "ingest.py — Strategy 5 chunking + preflight() + --reset + --limit flags",
-    "chunking-strategy.md: Strategy 5 spec documented",
+    "app/config.py: ShopAIKey provider + agent_db_path added",
+    "app/openai_client.py: make_openai_client() factory with browser User-Agent",
+    "ingest.py — Strategy 5 chunking + preflight() + --reset + --limit",
     "Day 1 verified: similarity search + reranker endpoint both passing",
-    "qdrant-client API fix: .search() removed in v1.9+, migrated to .query_points()",
-    "rag/retriever.py — RetrievedDoc dataclass, build_filter() with 5 filter types, retrieve() top-20 with QdrantClient singleton",
+    "rag/retriever.py — RetrievedDoc, build_filter(), retrieve() + QdrantClient singleton",
     "rag/reranker.py — async httpx rerank() via vLLM /v1/rerank",
     "rag/chain.py — full pipeline: extract_filters → rewrite_query → retrieve → rerank → generate",
-    "Prompt engineering: structured system prompt with citation [1][2] format + 2 few-shot Q&A examples",
-    "Query rewriting: 5 few-shot examples, returns original on no-op",
-    "Auto-filter extraction: GPT-4o-mini + json_object response_format + FilterParams dataclass",
-    "Prompt caching: static system prompt >1024 tokens → OpenAI prefix cache on repeated calls",
-    "Day 2 E2E tested: 5 diverse queries, all passed with correct citations and filters"
+    "Prompt engineering: structured system prompt with [1][2] citation format + 2 few-shot Q&A examples",
+    "Query rewriting: 5 few-shot examples",
+    "Auto-filter extraction: GPT-4o-mini + json_object + FilterParams dataclass",
+    "Day 2 E2E tested and passing",
+    "agent/state.py — AgentState with 7 fields: messages, intent, retrieval_query, retrieved_docs, reranked_docs, tool_output, final_answer",
+    "agent/tools.py — search_anime() (retrieve+rerank, Qdrant-backed), get_anime_details() (anilist_id scroll + vector fallback)",
+    "agent/nodes.py — make_nodes() factory: router, rag, reranker, tool, synthesizer",
+    "agent/graph.py — build_graph() with InMemorySaver + conditional edges",
+    "_contextualize_query(): follow-up query resolution using last 4 turn-pairs",
+    "_trim_and_format_history(): last 5 turn-pairs injected into synthesizer LLM call",
+    "docs/architecture/agent.md created with full graph topology, node descriptions, state schema, memory design",
+    "docs/patterns/code_patterns.md updated with LangGraph patterns",
+    "docs/decisions/technical_decisions.md updated with D18-D22"
   ],
   "run_order": [
     "1. docker compose up -d",
     "2. cd backend && python scripts/ingest.py --reset   # if collection empty",
-    "3. Verify: curl -s http://localhost:6333/collections/anime | python3 -m json.tool",
-    "4. Test RAG: python3 -c \"import asyncio; from app.openai_client import make_openai_client; from app.rag.chain import rag_answer; asyncio.run(rag_answer('best action anime 2023', make_openai_client()))\"",
-    "5. Day 3: implement LangGraph agent in backend/app/agent/"
+    "3. Test agent:",
+    "   python3 -c \"import asyncio; from langchain_core.messages import HumanMessage; from app.openai_client import make_openai_client; from app.agent.graph import build_graph; asyncio.run(build_graph(make_openai_client()).ainvoke({'messages': [HumanMessage(content='best action anime 2023')]}, config={'configurable': {'thread_id': 'test'}}))\"",
+    "4. Day 4: implement backend/app/api/routes.py with FastAPI endpoints"
   ],
   "context_pointers": [
     "plan_v2.md",
     "AGENTS.md",
-    "chunking-strategy.md",
-    "docker-compose.yml",
+    "docs/architecture/agent.md",
     "docs/decisions/technical_decisions.md",
     "docs/patterns/code_patterns.md",
     "backend/app/config.py",
@@ -51,9 +58,20 @@
     "backend/app/rag/retriever.py",
     "backend/app/rag/reranker.py",
     "backend/app/rag/chain.py",
-    "backend/scripts/fetch_anilist.py",
-    "backend/scripts/ingest.py"
+    "backend/app/agent/state.py",
+    "backend/app/agent/tools.py",
+    "backend/app/agent/nodes.py",
+    "backend/app/agent/graph.py"
   ],
+  "agent_notes": {
+    "intents": ["qa", "search", "detail"],
+    "qa_pipeline": "contextualize → extract_filters → rewrite → retrieve(20) → rerank(5) → build_context → LLM([system]+[history 5 pairs]+[context+question])",
+    "search_pipeline": "extract_filters → search_anime (retrieve+rerank) → format_tool_output → LLM",
+    "detail_pipeline": "extract_title → get_anime_details (anilist_id scroll OR vector similarity) → format_detail → LLM",
+    "checkpointer": "InMemorySaver (Day 3). AsyncSqliteSaver via FastAPI lifespan (Day 4).",
+    "history_window": "synthesizer: last 5 turn-pairs (10 msgs). contextualizer: last 4 turn-pairs (8 msgs).",
+    "session_id": "thread_id in LangGraph config. Frontend generates UUID, stores in localStorage (Day 5)."
+  },
   "rag_pipeline_notes": {
     "retriever_top_k": 20,
     "reranker_top_k": 5,
@@ -62,21 +80,35 @@
     "reranker_model": "Qwen/Qwen3-Reranker-0.6B via vLLM",
     "auto_filter": "extract_filters() parses year/genre/format/score from natural language",
     "query_rewrite": "5 few-shot examples, identity rewrites discarded",
+    "contextualize": "_contextualize_query() resolves follow-up references using history",
     "citation_format": "[1][2] inline + Sources: footer line",
-    "streaming": "stream=True returns AsyncIterator[str]"
+    "streaming": "Day 4 — astream_events() via SSE endpoint"
   },
   "docker_notes": {
     "start": "cd ~/misa/Animind && docker compose up -d",
     "stop": "cd ~/misa/Animind && docker compose down",
-    "logs": "docker compose logs -f",
     "verify_qdrant": "curl -s http://localhost:6333/healthz",
     "verify_reranker": "curl -s http://localhost:8001/health"
   },
+  "day4_plan": {
+    "files": [
+      "backend/app/api/routes.py — POST /chat, GET /chat/stream, GET /health",
+      "backend/app/main.py — FastAPI app with lifespan (AsyncSqliteSaver + compiled graph)",
+      "backend/app/api/schemas.py — ChatRequest, ChatResponse Pydantic models"
+    ],
+    "key_decisions": [
+      "AsyncSqliteSaver via async context manager in lifespan",
+      "astream_events(version='v2') for SSE token streaming",
+      "thread_id from request body (not header)",
+      "CORS for frontend_url from settings"
+    ]
+  },
   "known_gotchas": [
-    "qdrant-client >= 1.9: use .query_points() not .search() (AttributeError otherwise)",
-    "ShopAIKey requires User-Agent header (Cloudflare WAF blocks plain requests)",
-    "ShopAIKey may return 522 Cloudflare timeout — retry after a few minutes",
-    "AsyncOpenAI client: all methods are coroutines, must be awaited",
-    "extract_filters uses response_format=json_object — not supported by all OpenAI-compatible providers; falls back gracefully on error"
+    "qdrant-client >= 1.9: use .query_points() not .search()",
+    "ShopAIKey requires User-Agent header (Cloudflare WAF)",
+    "AsyncOpenAI: all methods are coroutines, must be awaited",
+    "AsyncSqliteSaver.from_conn_string() is an async context manager — NOT a direct saver. Use 'async with' in FastAPI lifespan.",
+    "InMemorySaver is used for testing (Day 3); state is lost on process restart",
+    "LangGraph thread_id MUST be passed in every ainvoke() config — without it each call is a fresh conversation"
   ]
 }

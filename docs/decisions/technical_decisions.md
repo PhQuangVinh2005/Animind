@@ -129,3 +129,26 @@
 - **Prompt structure for caching:** System prompt is static (>1024 tokens) → OpenAI prefix caching activates on second request. User message contains dynamic context passages + question.
 - **Few-shot examples in system prompt:** Two complete Q&A pairs demonstrate the expected response structure (direct answer → cited bullets → sources line).
 - **Trade-off:** Longer system prompt = more input tokens per call, but offset by caching on repeated requests.
+
+## D21: Contextual Query Reformulation for Multi-Turn
+- **Problem:** Follow-up questions ("what about its score?") lose context when used as retrieval queries. The conversation history is stored in LangGraph state but `rag_node` only read the last message.
+- **Decision:** Add `_contextualize_query()` step at the start of `rag_node`. Uses GPT-4o-mini with 3 few-shot examples to rewrite follow-ups into self-contained retrieval queries before `extract_filters()` and `rewrite_query()`.
+- **Pipeline:** `last_message → contextualize → extract_filters → rewrite → retrieve → rerank → synthesize`
+- **History window:** Last 4 turn-pairs (8 messages); older turns dropped to control token cost.
+- **Fallback:** Returns original query if history is empty (first turn) or on LLM failure.
+- **Trade-off:** One extra LLM call per qa turn (~50ms). Skipped automatically on first message.
+
+## D22: Multi-User Session Orchestration
+- **Session identity:** Frontend generates UUID v4 on first page load, stored in localStorage. Sent as `session_id` in every request body.
+- **LangGraph mapping:** `session_id` → `thread_id` in `{"configurable": {"thread_id": session_id}}`. Checkpointer isolates state per thread automatically.
+- **Singleton graph:** ONE compiled StateGraph built at FastAPI startup (`app.state.agent`), reused across all requests. Thread-safe.
+- **Persistence:** `AsyncSqliteSaver` managed via FastAPI lifespan. Survives server restarts.
+- **FastAPI lifespan pattern:**
+  ```python
+  @asynccontextmanager
+  async def lifespan(app: FastAPI):
+      async with AsyncSqliteSaver.from_conn_string(settings.agent_db_path) as saver:
+          app.state.agent = build_graph(oai_client, checkpointer=saver)
+          yield
+  ```
+- **Scale ceiling:** SQLite write lock under >50 concurrent users → migrate to AsyncPostgresSaver.
