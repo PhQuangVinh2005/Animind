@@ -10,7 +10,7 @@ venv/
 .env
 
 # Data
-data/raw/*.json
+backend/data/raw/*.json
 qdrant_data/
 
 # IDE

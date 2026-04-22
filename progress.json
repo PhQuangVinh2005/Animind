@@ -1,9 +1,9 @@
 {
-  "feature": "day1-docker-setup",
-  "stage": "docker-containers-verified",
+  "feature": "day1b-data-ingestion",
+  "stage": "ingestion-pipeline-complete-ready-to-run",
   "day": 1,
-  "last_success": "Qdrant v1.17.1 + vLLM v0.19.1 reranker both healthy, /health returns 200",
-  "next_step": "Day 1b: Implement scripts/fetch_anilist.py — AniList GraphQL pagination, ~20k records → data/raw/anime.json",
+  "last_success": "ingest.py fully refactored: Strategy 5 chunking, preflight health checks, --reset flag. fetch_anilist.py expanded to 39 fields. anime.json fetched (1250 records). Qdrant running.",
+  "next_step": "Day 1c: Run `python scripts/ingest.py --reset` to populate Qdrant. Then Day 2: build RAG retriever + reranker pipeline.",
   "open_questions": [],
   "completed": [
     "plan_v1 drafted and reviewed",
@@ -14,14 +14,35 @@
     "docker-compose.yml production-ready: pinned versions, health checks, resource limits, named volumes, log rotation",
     "Qdrant v1.17.1 container running (:6333/:6334)",
     "vLLM v0.19.1 reranker container running (:8001) with Qwen3-Reranker-0.6B",
-    "Key fix: vLLM v0.19.1 uses ENTRYPOINT=['vllm','serve'], --task replaced with --runner pooling"
+    "Key fix: vLLM v0.19.1 uses ENTRYPOINT=['vllm','serve'], --task replaced with --runner pooling",
+    "fetch_anilist.py expanded: 39 fields (synonyms, source, country_of_origin, is_adult, rankings, streaming_links, banner_image, trailer_info, mean_score, studios, etc.), interrupt-safe checkpointing",
+    "anime.json fetched: 1250 records, 6.2MB",
+    "app/config.py: switched to SHOPAIKEY_* provider (OpenAI-compatible, requires User-Agent header)",
+    "app/openai_client.py: make_openai_client() factory with browser User-Agent for ShopAIKey",
+    "ingest.py — Strategy 5 chunking: clean_html() + process_anime() per chunking-strategy.md spec",
+    "ingest.py — preflight(): checks Qdrant + embedding API before starting, fails fast with clear messages",
+    "ingest.py — --reset flag: deletes Qdrant collection before ingest for clean slate",
+    "ingest.py — --limit flag for test runs",
+    "ingest.py — global EMBED_BATCH_SIZE SyntaxError fixed",
+    "chunking-strategy.md: Strategy 5 spec documented"
+  ],
+  "run_order": [
+    "1. docker compose up -d qdrant   # ensure Qdrant is running",
+    "2. cd backend && python scripts/ingest.py --reset   # clean ingest, ~1250 records",
+    "3. Verify: curl -s http://localhost:6333/collections/anime | python3 -m json.tool",
+    "4. Day 2: implement RAG retriever + reranker pipeline in backend/app/rag/"
   ],
   "context_pointers": [
     "plan_v2.md",
     "AGENTS.md",
+    "chunking-strategy.md",
     "docker-compose.yml",
     "docs/decisions/technical_decisions.md",
-    "docs/patterns/code_patterns.md"
+    "docs/patterns/code_patterns.md",
+    "backend/app/config.py",
+    "backend/app/openai_client.py",
+    "backend/scripts/fetch_anilist.py",
+    "backend/scripts/ingest.py"
   ],
   "docker_notes": {
     "start": "cd ~/misa/Animind && docker compose up -d",
@@ -29,6 +50,20 @@
     "logs": "docker compose logs -f",
     "verify_qdrant": "curl -s http://localhost:6333/healthz",
     "verify_reranker": "curl -s http://localhost:8001/health",
-    "test_rerank": "curl -s http://localhost:8001/v1/rerank -H 'Content-Type: application/json' -d '{\"model\":\"Qwen/Qwen3-Reranker-0.6B\",\"query\":\"best action anime\",\"documents\":[\"Naruto is a popular action anime\",\"Cooking recipes\"]}'"
+    "test_rerank": "curl -s http://localhost:8001/v1/rerank -H 'Content-Type: application/json' -d '{\"model\":\"Qwen/Qwen3-Reranker-0.6B\",\"query\":\"best action anime\",\"documents\":[\"Naruto is a popular action anime\",\"Cooking recipes\"]}'",
+    "clean_qdrant": "curl -X DELETE http://localhost:6333/collections/anime"
+  },
+  "ingest_commands": {
+    "test_run": "cd backend && python scripts/ingest.py --limit 10",
+    "full_reset_ingest": "cd backend && python scripts/ingest.py --reset",
+    "incremental_upsert": "cd backend && python scripts/ingest.py",
+    "check_collection": "curl -s http://localhost:6333/collections/anime | python3 -m json.tool"
+  },
+  "shopaikey_notes": {
+    "provider": "ShopAIKey (OpenAI-compatible proxy)",
+    "base_url": "https://api.shopaikey.com/v1",
+    "models": "gpt-4o-mini (chat), text-embedding-3-small (embeddings)",
+    "required_header": "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "note": "API sometimes returns Cloudflare 522 — retry after a few minutes if preflight fails"
   }
 }

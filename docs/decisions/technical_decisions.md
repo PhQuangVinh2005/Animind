@@ -2,18 +2,18 @@
 
 ## D1: AniList > MyAnimeList
 - **Decision:** Use AniList GraphQL API instead of MAL
-- **Reason:** 90 req/min (vs MAL 1 req/s), GraphQL flexible queries, no OAuth needed
+- **Reason:** 90 req/min (vs MAL 1 req/s), GraphQL flexible queries, no OAuth needed for public media data
 - **Trade-off:** Slightly smaller dataset than MAL, but sufficient for demo
 
 ## D2: Qdrant > Milvus
 - **Decision:** Use Qdrant for vector storage
-- **Reason:** Simpler single-node setup, modern REST API, native metadata filtering
+- **Reason:** Simpler single-node setup, modern REST API, native metadata filtering, active development
 - **Trade-off:** Milvus has more enterprise features, but overkill for this project
 
 ## D3: Qwen3-Reranker-0.6B via vLLM
 - **Decision:** Local reranker instead of cross-encoder or API-based
 - **Reason:** ~2GB VRAM (fits easily on 16GB GPU), OpenAI-compatible `/v1/rerank` endpoint, zero cost
-- **Trade-off:** Requires vLLM setup, but docker makes it trivial
+- **Trade-off:** Requires vLLM setup, but Docker makes it trivial
 
 ## D4: Cloudflare Tunnel > ngrok
 - **Decision:** Use Cloudflare Tunnel to expose backend
@@ -69,3 +69,43 @@
 - **Reason:** Docker-managed, portable, avoids permission issues, HF cache persists model weights across restarts
 - **Trade-off:** Slightly harder to inspect directly (use `docker volume inspect`)
 
+## D14: ShopAIKey as OpenAI-Compatible Provider
+- **Decision:** Route all OpenAI API calls through ShopAIKey (`https://api.shopaikey.com/v1`)
+- **Reason:** Cost optimization; ShopAIKey provides OpenAI-compatible endpoints at reduced cost
+- **Required:** Must pass browser-like `User-Agent` header or requests are blocked by Cloudflare WAF
+- **Client config:**
+  ```python
+  AsyncOpenAI(
+      api_key=settings.shopaikey_api_key,
+      base_url="https://api.shopaikey.com/v1",
+      default_headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+  )
+  ```
+- **Gotcha:** API occasionally returns Cloudflare 522 (origin timeout). Retry after a few minutes.
+- **Trade-off:** Dependency on third-party proxy; switch `SHOPAIKEY_BASE_URL` to `https://api.openai.com/v1` to go direct
+
+## D15: Strategy 5 Chunking (Hybrid Metadata Filter + Single Chunk)
+- **Decision:** One vector per anime with structured chunk text + rich Qdrant payload
+- **Reason:** Anime records are self-contained semantic units (~300-1500 chars). Chunking would break context. Payload metadata enables pre-filtering before vector search.
+- **Chunk format:**
+  ```
+  Title1. Title2. TitleNative. Synonym1. Synonym2.
+  Genre1, Genre2, Genre3.
+  Tag1 (rank≥70), Tag2, Tag3.
+  Synopsis text (HTML-stripped, ≤1000 chars).
+  Studio: X. Year: Y. Season: Spring. Format: TV. Episodes: 25. Score: 8.5. Source: Manga.
+  ```
+- **Payload includes:** `full_data` (entire raw JSON) for reranker and LLM context, plus filterable fields (`year`, `score`, `genres`, `tags`, `format`, `status`)
+- **Trade-off:** Slightly larger Qdrant storage due to `full_data` in payload; negligible at 1250 records
+
+## D16: AniList GraphQL Field Expansion (39 fields)
+- **Decision:** Fetch 39 fields per anime (expanded from initial ~20)
+- **Added fields:** `synonyms`, `source`, `country_of_origin`, `is_adult`, `rankings`, `streaming_links`, `banner_image`, `trailer_info`, `mean_score`, `id_mal`, `studios` (with URLs), `next_airing_episode`, `trending`, `favourites`, `season_year`
+- **Reason:** Richer payload enables better metadata filtering, frontend display, and reranker context
+- **Trade-off:** Larger `anime.json` (~6.2MB), but one-time cost
+
+## D17: Interrupt-Safe Fetch Checkpointing
+- **Decision:** Save page-by-page checkpoint in `data/raw/.fetch_checkpoint.json`
+- **Reason:** AniList rate-limits at 30 req/min; a crash mid-fetch would require restarting from scratch
+- **Implementation:** Save after every 5 pages. `--reset` flag clears checkpoint for fresh start.
+- **Trade-off:** Slightly more complex fetch logic, but protects against data loss
