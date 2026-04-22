@@ -178,23 +178,38 @@ async def rerank(query: str, documents: list[str], top_k: int = 5) -> list[dict]
 
 ## ✅ DO: Qdrant search with metadata filter
 ```python
-from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
+from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchAny, MatchValue, Range
 
+# NOTE: .search() was removed in qdrant-client v1.9+. Use .query_points() instead.
 # Example: "action anime 2023 score > 8.0"
 qdrant_filter = Filter(
     must=[
-        FieldCondition(key="genres", match=MatchValue(value="Action")),
+        FieldCondition(key="genres", match=MatchAny(any=["Action"])),
         FieldCondition(key="year",   match=MatchValue(value=2023)),
-        FieldCondition(key="score",  range=Range(gte=80)),   # 8.0 * 10
+        FieldCondition(key="score",  range=Range(gte=80)),   # 8.0 × 10
     ]
 )
 
-results = await qdrant_client.search(
+client = QdrantClient(url=settings.qdrant_url)
+results = client.query_points(
     collection_name=settings.qdrant_collection,
-    query_vector=embedding,
+    query=embedding_vector,    # list[float]
     query_filter=qdrant_filter,
-    limit=20,       # top-20 for reranker input
+    limit=20,                  # top-20 for reranker input
     with_payload=True,
+)
+for pt in results.points:
+    print(pt.id, pt.score, pt.payload.get("title"))
+```
+
+## ❌ DON'T: Use the removed .search() method
+```python
+# REMOVED in qdrant-client >= 1.9 — will raise AttributeError
+results = client.search(
+    collection_name="anime",
+    query_vector=embedding,
+    limit=20,
 )
 ```
 
@@ -219,4 +234,66 @@ async def preflight(qdrant: AsyncQdrantClient, openai_client: AsyncOpenAI) -> No
     except Exception as exc:
         logger.error("Embedding API error — check SHOPAIKEY_API_KEY and provider status")
         raise SystemExit(1) from exc
+```
+
+---
+
+## ✅ DO: Full RAG pipeline call (rag_answer)
+```python
+from app.openai_client import make_openai_client
+from app.rag.chain import rag_answer
+
+oai = make_openai_client()
+
+# Simple — auto-extracts filters from query, rewrites, retrieves, reranks, generates
+answer = await rag_answer("best action anime 2023", oai)
+
+# With explicit filters (bypasses auto-extraction)
+answer = await rag_answer(
+    "recommend something exciting",
+    oai,
+    filter_kwargs={"genres": ["Action"], "year": 2023},
+)
+
+# Streaming
+async for chunk in await rag_answer("top 5 romance anime", oai, stream=True):
+    print(chunk, end="", flush=True)
+```
+
+---
+
+## ✅ DO: Auto-extract metadata filters from natural language
+```python
+from app.rag.chain import extract_filters
+
+# Returns a FilterParams dataclass; use .to_dict() for retriever.build_filter()
+params = await extract_filters("highly rated sci-fi movies from 2020", oai_client)
+# → FilterParams(genres=['Sci-Fi'], format_='MOVIE', year=2020)
+print(params.to_dict())
+# → {'genres': ['Sci-Fi'], 'format_': 'MOVIE', 'year': 2020}
+
+if not params.is_empty():
+    hits = await retrieve(query, oai_client, filter_kwargs=params.to_dict())
+```
+
+---
+
+## ✅ DO: QdrantClient singleton (don't re-instantiate per request)
+```python
+# retriever.py — module-level singleton, not one per call
+_qdrant_client: QdrantClient | None = None
+
+def _get_qdrant() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = QdrantClient(url=settings.qdrant_url)
+    return _qdrant_client
+```
+
+## ❌ DON'T: Instantiate QdrantClient inside a request handler
+```python
+# Creates a new TCP connection on every call — wasteful
+async def retrieve(query):
+    qdrant = QdrantClient(url=settings.qdrant_url)  # KHÔNG làm thế này
+    ...
 ```

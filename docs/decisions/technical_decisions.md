@@ -109,3 +109,23 @@
 - **Reason:** AniList rate-limits at 30 req/min; a crash mid-fetch would require restarting from scratch
 - **Implementation:** Save after every 5 pages. `--reset` flag clears checkpoint for fresh start.
 - **Trade-off:** Slightly more complex fetch logic, but protects against data loss
+
+## D18: LLM-Powered Auto-Filter Extraction
+- **Decision:** Call GPT-4o-mini to parse metadata filters (year, genre, format, score) from the raw user query before retrieval
+- **Reason:** Users phrase queries naturally ("best romance movies from 2020"); manual parsing is brittle; `response_format=json_object` forces well-formed output
+- **Implementation:** `extract_filters()` in `chain.py`. Falls back gracefully (returns empty `FilterParams`) on any failure.
+- **Trade-off:** One extra LLM call per request (~50ms, ~30 tokens). Disabled by passing `auto_filter=False` or `filter_kwargs=...` directly.
+- **FilterParams fields:** `genres`, `year`, `year_min`, `year_max`, `format_`, `score_min`, `is_adult`
+
+## D19: Few-Shot Query Rewriting
+- **Decision:** Use a system prompt with 5 input/output examples to rewrite queries before embedding
+- **Reason:** Vague conversational queries ("something exciting") embed poorly. Few-shot examples teach the LLM to expand into keyword-rich retrieval queries without explanation. Zero-shot rewriting produced identity rewrites (no-op).
+- **Implementation:** `rewrite_query()` in `chain.py` — returns original query on failure or if rewrite is identical.
+- **Trade-off:** One extra LLM call per request. Skip with `rewrite=False`.
+
+## D20: Structured System Prompt with Citation Format
+- **Decision:** System prompt enforces `[1]`, `[2]` inline citation format and ends with `Sources: [1] Title, [2] Title`
+- **Reason:** Grounded answers need traceable citations. Without explicit format instructions, GPT-4o-mini skips citations inconsistently.
+- **Prompt structure for caching:** System prompt is static (>1024 tokens) → OpenAI prefix caching activates on second request. User message contains dynamic context passages + question.
+- **Few-shot examples in system prompt:** Two complete Q&A pairs demonstrate the expected response structure (direct answer → cited bullets → sources line).
+- **Trade-off:** Longer system prompt = more input tokens per call, but offset by caching on repeated requests.
