@@ -5,8 +5,9 @@
 # Starts:
 #   1. Docker (Qdrant :6333 + vLLM Reranker :8001)
 #   2. FastAPI backend (uvicorn :8000, conda animind env)
+#   3. Next.js frontend (npm run dev :3000)
 #
-# Does NOT touch: Cloudflare Tunnel, Vercel (cloud services)
+# Does NOT touch: Cloudflare Tunnel (cloud service)
 
 set -euo pipefail
 
@@ -25,12 +26,16 @@ waiting() { echo -e "${BLUE}[…]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_DIR/backend"
+FRONTEND_DIR="$PROJECT_DIR/frontend"
 LOG_DIR="$PROJECT_DIR/.logs"
 CONDA_ENV="animind"
 CONDA_BASE="$(conda info --base 2>/dev/null || echo "$HOME/miniforge3")"
 UVICORN_BIN="$CONDA_BASE/envs/$CONDA_ENV/bin/uvicorn"
 UVICORN_LOG="$LOG_DIR/backend.log"
 UVICORN_PID="$LOG_DIR/backend.pid"
+FRONTEND_DIR="$PROJECT_DIR/frontend"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
+FRONTEND_PID="$LOG_DIR/frontend.pid"
 
 mkdir -p "$LOG_DIR"
 
@@ -113,6 +118,45 @@ for i in $(seq 1 20); do
     sleep 1
 done
 
+# ── 7. Kill any existing process on :3000 ────────────────────────────────────
+if lsof -ti :3000 > /dev/null 2>&1; then
+    warn "Port 3000 already in use — killing existing process..."
+    # shellcheck disable=SC2046
+    kill -9 $(lsof -ti :3000) 2>/dev/null || true
+    sleep 1
+fi
+
+# ── 8. Start Next.js frontend ────────────────────────────────────────────────
+if [ ! -f "$FRONTEND_DIR/package.json" ]; then
+    warn "frontend/package.json not found — skipping frontend start"
+else
+    if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+        waiting "Installing frontend dependencies (npm install)..."
+        cd "$FRONTEND_DIR" && npm install --silent
+    fi
+
+    waiting "Starting Next.js frontend (npm run dev :3000)..."
+    cd "$FRONTEND_DIR"
+    nohup npm run dev \
+        > "$FRONTEND_LOG" 2>&1 &
+    echo $! > "$FRONTEND_PID"
+    FRONTEND_PID_VAL=$!
+
+    # ── 9. Wait for frontend health ───────────────────────────────────────────
+    waiting "Waiting for Next.js frontend (:3000) — first compile may take ~15s..."
+    for i in $(seq 1 30); do
+        if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+            info "Frontend healthy (PID $FRONTEND_PID_VAL)"
+            break
+        fi
+        if [ "$i" -eq 30 ]; then
+            warn "Frontend not healthy after 30s — check logs: tail -f $FRONTEND_LOG"
+            break
+        fi
+        sleep 1
+    done
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
@@ -124,9 +168,12 @@ echo "  Qdrant UI      → http://localhost:6333/dashboard"
 echo "  Reranker       → http://localhost:8001"
 echo "  Backend API    → http://localhost:8000"
 echo "  Swagger UI     → http://localhost:8000/docs"
+echo "  Frontend       → http://localhost:3000"
 echo ""
 echo "  Backend log    → tail -f $UVICORN_LOG"
+echo "  Frontend log   → tail -f $FRONTEND_LOG"
 echo "  Backend PID    → $(cat "$UVICORN_PID" 2>/dev/null || echo '?')"
+echo "  Frontend PID   → $(cat "$FRONTEND_PID" 2>/dev/null || echo '?')"
 echo ""
 echo "  To stop all:   bash $SCRIPT_DIR/stop.sh"
 echo ""

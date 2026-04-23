@@ -1,64 +1,68 @@
-# AGENTS.md
+# CLAUDE.md
 
-## Project
-AniMind — Anime/Manga RAG Chatbot with LangGraph Agent, Qdrant vector search, Qwen3 reranker, and RAGAS evaluation.
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
-## Stack
-- Python 3.11 + pip (backend)
-- Node.js 20 + pnpm (frontend)
-- LangGraph + LangChain (agent framework)
-- FastAPI (backend API)
-- Next.js 14 + Vercel AI SDK (frontend)
-- Qdrant (vector DB, Docker)
-- vLLM (Qwen3-Reranker-0.6B, Docker)
-- OpenAI API (GPT-4o / GPT-4o-mini, text-embedding-3-small)
-- AniList GraphQL API (data source)
-- RAGAS (retrieval evaluation)
-- Cloudflare Tunnel (backend exposure)
-- Vercel (frontend deployment)
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-## Infrastructure
-- Homeserver: RTX 5060Ti 16GB VRAM, R7 5700X, 32GB RAM, Debian 13.4
-- VRAM budget: Reranker ~2GB / 16GB
-- RAM budget: Qdrant ~200MB + FastAPI ~500MB + vLLM ~2GB / 32GB
+## 1. Think Before Coding
 
-## Commands
-- Backend dev: `cd backend && uvicorn app.main:app --reload --port 8000`
-- Frontend dev: `cd frontend && pnpm dev`
-- Docker services: `docker compose up -d` (Qdrant + vLLM reranker)
-- Data ingestion: `cd backend && python scripts/ingest.py`
-- Fetch data: `cd backend && python scripts/fetch_anilist.py`
-- Evaluation: `cd backend && python eval/evaluate.py`
-- Tunnel: `cloudflared tunnel run animind`
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-## Conventions
-- Backend: Python, type hints everywhere, async where possible
-- Frontend: TypeScript strict, single quotes, 2-space indent
-- API calls use `httpx.AsyncClient`, NOT `requests`
-- LangGraph nodes are pure functions taking `AgentState` and returning partial state
-- All config via environment variables in `.env`, NEVER hardcode API keys
-- Logging via `loguru`, NOT `print()` or `logging`
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
 
-## Architecture
-- `backend/app/agent/` — LangGraph graph, nodes, tools, state
-- `backend/app/rag/` — retriever, reranker client, RAG chain
-- `backend/app/api/` — FastAPI routes (REST + SSE)
-- `backend/scripts/` — data fetching and ingestion
-- `backend/eval/` — RAGAS evaluation pipeline
-- `frontend/` — Next.js chat UI
+## 2. Simplicity First
 
-## Key APIs
-- Qdrant: `localhost:6333`
-- vLLM Reranker: `localhost:8001/v1/rerank`
-- FastAPI Backend: `localhost:8000`
-- AniList GraphQL: `https://graphql.anilist.co`
+**Minimum code that solves the problem. Nothing speculative.**
 
-## DON'T
-- KHÔNG commit `.env` — dùng `.env.example`
-- KHÔNG dùng `requests` library — dùng `httpx`
-- KHÔNG dùng `print()` — dùng `loguru`
-- KHÔNG sửa `data/raw/` sau khi fetch xong — đây là immutable raw data
-- KHÔNG hardcode model names — đặt trong config
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
