@@ -115,13 +115,15 @@ Each dict in `retrieved_docs` / `reranked_docs`:
 
 ## Multi-Turn Memory Design
 
-### What's implemented (Day 3)
-- **`InMemorySaver`** checkpointer — state persists within one process run
+### Implemented
+- **`AsyncSqliteSaver`** checkpointer — state persists across server restarts
 - **`thread_id` routing** — each session gets isolated state via LangGraph config
 - **Contextual query reformulation** — `_contextualize_query()` converts follow-up
   questions into self-contained retrieval queries using last 4 turn-pairs
 - **Conversation history in synthesizer** — last 5 turn-pairs injected into LLM call,
   enabling cross-turn comparisons and references
+- **Frontend persistence** — message history stored per-thread in `localStorage`;
+  switching sessions restores the previous conversation immediately
 
 ### Pipeline (qa turn with history):
 ```
@@ -133,16 +135,14 @@ Last user message
     → rerank(top_k=5)                            # Qwen3-Reranker
     → _build_context(top5)                       # numbered citation blocks
     → LLM([system] + [history 5 pairs] + [context + question])
-    → AIMessage (with [1][2] citations)
+    → AIMessage (with [1][2] citations) — streamed token-by-token via SSE
 ```
 
-### Planned (Day 4+)
-| Feature | Day | Notes |
-|---------|-----|-------|
-| `AsyncSqliteSaver` via FastAPI lifespan | 4 | Persists across restarts |
-| Session ID from frontend (`localStorage`) | 5 | `thread_id` per browser tab |
-| Message window summarization (>20 turns) | 7 | Polish — compress old history |
-| Cross-session user memory (Qdrant) | 7 | Optional — user preference store |
+### Future
+| Feature | Notes |
+|---------|-------|
+| Message window summarization (>20 turns) | Compress old history |
+| Cross-session user memory (Qdrant) | Optional — user preference store |
 
 ---
 

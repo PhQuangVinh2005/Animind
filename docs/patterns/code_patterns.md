@@ -429,3 +429,175 @@ print(result["intent"], result["final_answer"])
 # KHÔNG làm thế này — no memory, each call is isolated
 result = await agent.ainvoke({"messages": [HumanMessage(content=query)]})
 ```
+
+---
+
+# Frontend Patterns (Next.js / TypeScript)
+
+## ✅ DO: SSE proxy route (Next.js App Router)
+```ts
+// app/api/chat/stream/route.ts
+import { NextRequest } from 'next/server';
+
+export const dynamic = 'force-dynamic';   // never statically prerender
+
+const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:8000';
+
+export async function POST(req: NextRequest) {
+  const body = await req.text();
+  const backendRes = await fetch(`${BACKEND_URL}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    cache: 'no-store',   // critical: prevents Next.js response buffering
+  });
+
+  return new Response(backendRes.body, {
+    status: backendRes.status,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'X-Accel-Buffering': 'no',
+    },
+  });
+}
+```
+
+## ❌ DON'T: Call the backend directly from the browser for streaming
+```ts
+// Cloudflare buffers entire responses — streaming breaks
+const res = await fetch('https://api.vinhkaguya.me/chat/stream', { ... });
+```
+
+---
+
+## ✅ DO: Flat SSE reader with callbacks (not async generator)
+```ts
+// lib/api.ts — flat while-loop, reliable across all browser environments
+export async function streamChat(
+  message: string,
+  threadId: string,
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const response = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, thread_id: threadId }),
+  });
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent: string | undefined;
+  let currentData: string | undefined;
+
+  try {
+    outer: while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.replace(/\r$/, '');
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          currentData = line.slice(6);
+        } else if (line === '') {
+          if (currentData !== undefined) {
+            const done = handleEvent(currentEvent, currentData, callbacks);
+            currentEvent = undefined;
+            currentData = undefined;
+            if (done) break outer;
+          }
+        }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  callbacks.onDone();
+}
+```
+
+## ❌ DON'T: Use async generator for SSE (browser compatibility issues)
+```ts
+// Caused silent failures with React 18 batched updates
+async function* readSSE(url: string, body: object) {
+  // ... yields events
+}
+```
+
+---
+
+## ✅ DO: Persist messages per thread in localStorage
+```ts
+// lib/sessions.ts
+const MSG_PREFIX = 'animind_msgs_';
+
+export function saveMessages(thread_id: string, messages: ChatMessage[]): void {
+  const completed = messages.filter(m => !m.streaming);
+  try {
+    localStorage.setItem(MSG_PREFIX + thread_id, JSON.stringify(completed));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+export function loadMessages(thread_id: string): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(MSG_PREFIX + thread_id);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+// In ChatWindow.tsx — load on session switch
+useEffect(() => {
+  const saved = loadMessages(threadId);
+  setMessages(saved);
+  isFirstMessage.current = saved.length === 0;
+}, [threadId]);
+
+// Save inside setMessages functional updater after onDone
+setMessages(prev => {
+  const updated = prev.map(m => m.id === assistantId ? { ...m, streaming: false } : m);
+  saveMessages(threadId, updated);  // always latest state
+  return updated;
+});
+```
+
+## ❌ DON'T: Save inside onDone callback directly
+```ts
+// prev state may be stale if React batched updates
+onDone() {
+  saveMessages(threadId, messages);  // WARN: may use stale closure value
+  setMessages(prev => prev.map(...));
+}
+```
+
+---
+
+## ✅ DO: Render assistant messages as markdown
+```tsx
+// components/MessageBubble.tsx
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
+{message.role === 'assistant' ? (
+  <div className="prose prose-sm max-w-none prose-p:my-1 prose-li:my-0.5">
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      {message.content}
+    </ReactMarkdown>
+  </div>
+) : (
+  <p>{message.content}</p>
+)}
+```
+
+## ❌ DON'T: Render LLM output as plain text (citations and formatting lost)
+```tsx
+// Asterisks, headers, lists all appear as raw characters
+<p>{message.content}</p>
+```

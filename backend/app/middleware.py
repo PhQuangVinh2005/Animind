@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Callable
 
 from loguru import logger
 from starlette.datastructures import MutableHeaders

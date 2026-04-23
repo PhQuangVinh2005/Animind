@@ -1,6 +1,8 @@
 # AniMind — Anime/Manga RAG Chatbot
 
-An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant vector search, Qwen3 reranker, and GPT-4o. Ask natural language questions about anime and get grounded, accurate answers with real-time streaming.
+An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant vector search, Qwen3 reranker, and GPT-4o-mini. Ask natural language questions about anime and get grounded, accurate answers with real-time streaming.
+
+> **Status:** Local development — not yet exposed publicly. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full developer guide.
 
 ## Features
 
@@ -9,7 +11,9 @@ An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant vector sea
 - **Metadata Filtering** — Pre-filter by year, genre, score, format before vector search
 - **Reranking** — Qwen3-Reranker-0.6B (local, zero cost) for improved retrieval quality
 - **Multi-turn Memory** — Persistent conversation history via LangGraph + SQLite checkpointer
-- **SSE Streaming** — Real-time token streaming via `POST /chat/stream`
+- **Real-time SSE Streaming** — Token-by-token streaming via Next.js proxy route (bypasses Cloudflare buffering)
+- **Markdown Rendering** — Assistant responses rendered as rich markdown (bold, lists, code, citations)
+- **Conversation Persistence** — Per-thread message history stored in localStorage; survives page refresh and session switching
 - **Security Headers** — OWASP hardened headers (X-Content-Type-Options, X-Frame-Options, etc.)
 - **Request Tracing** — UUID4 `X-Request-ID` on every request/response for log correlation
 - **Evaluation** — RAGAS metrics for retrieval quality assessment
@@ -25,23 +29,30 @@ cd Animind
 cp .env.example backend/.env
 # Edit backend/.env — add SHOPAIKEY_API_KEY
 
-# 3. Start infrastructure (Qdrant + vLLM reranker)
-docker compose up -d
+# 3. Configure frontend env
+cat > frontend/.env.local << 'EOF'
+NEXT_PUBLIC_API_URL=http://localhost:8000
+BACKEND_URL=http://localhost:8000
+EOF
 
-# 4. Fetch + ingest data
+# 4. Start all infrastructure (Qdrant + vLLM reranker + FastAPI backend)
+bash scripts/start.sh
+
+# 5. Fetch + ingest data (first time only)
 cd backend
-pip install -r requirements.txt
+conda activate animind
 python scripts/fetch_anilist.py        # fetches ~1250 anime records
-python scripts/ingest.py --reset       # embeds + upserts to Qdrant
+python scripts/ingest.py               # embeds + upserts to Qdrant
 
-# 5. Start backend
-uvicorn app.main:app --reload --port 8000
-
-# 6. (Optional) Start frontend
-cd ../frontend
-pnpm install
-pnpm dev
+# 6. Start frontend dev server
+cd frontend
+npm install
+npm run dev
 ```
+
+Frontend: **http://localhost:3000** | API Docs: **http://localhost:8000/docs**
+
+> See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed setup, daily workflow, and troubleshooting.
 
 ## API Endpoints
 
@@ -150,6 +161,7 @@ Run **on your laptop** to access all services locally:
 
 ```bash
 ssh -N \
+  -L 3000:localhost:3000 \
   -L 6333:localhost:6333 \
   -L 6334:localhost:6334 \
   -L 8000:localhost:8000 \
@@ -158,17 +170,35 @@ ssh -N \
 ```
 
 After connecting, access from your laptop:
+- `http://localhost:3000` — Next.js frontend
 - `http://localhost:6333/dashboard` — Qdrant Web UI
 - `http://localhost:8000/docs` — FastAPI Swagger UI
 - `http://localhost:8001/health` — vLLM Reranker
 
 ## Architecture
 
+### Current (Local Development)
+
 ```
-User → Vercel (Next.js)
+Browser (localhost:3000)
+    │
+    │  POST /api/chat/stream    ← Next.js SSE proxy (bypasses Cloudflare buffering)
+    ▼
+Next.js Dev Server (:3000)
+    │
+    │  POST /chat/stream        ← server-to-server, direct TCP
+    ▼
+FastAPI + LangGraph (:8000)
+    ├── Router node    — GPT-4o-mini intent classification
+    ├── RAG node       — extract_filters → rewrite_query → retrieve top-20
+    ├── Rerank node    — Qwen3-Reranker-0.6B → top-5
+    ├── Tool node      — search_anime / get_anime_details
+    └── Synthesizer    — GPT-4o-mini streams answer via SSE
+         ├── Qdrant (:6333)          — vector DB
+         └── vLLM Reranker (:8001)   — local reranker
 ```
 
-Was the original plan. **Actual architecture (Option B — everything self-hosted):**
+### Planned (Future — after RAG pipeline improvements)
 
 ```
 Browser → https://chat.vinhkaguya.me  (Cloudflare CDN)
@@ -178,12 +208,6 @@ Browser → https://chat.vinhkaguya.me  (Cloudflare CDN)
 Browser → https://api.vinhkaguya.me   (Cloudflare CDN)
                ↓ tunnel
          cloudflared daemon → http://localhost:8000 (FastAPI)
-
-Homeserver (kaguyaserver)
-  ├── Next.js frontend    :3000  (animind-frontend.service)
-  ├── FastAPI + LangGraph :8000  (animind-backend.service)
-  ├── Qdrant (Docker)     :6333
-  └── vLLM Reranker       :8001
 ```
 
 ## Backend Structure
@@ -268,8 +292,9 @@ journalctl -u animind-backend -u cloudflared-animind -f
 
 ## Documentation
 
+- [DEVELOPMENT.md](DEVELOPMENT.md) — Developer guide: setup, workflow, design decisions, smoke tests, troubleshooting
 - [Plan](plan_v2.md) — Detailed 7-day implementation plan
 - [Agent Architecture](docs/architecture/agent.md) — LangGraph graph topology + state schema
-- [Decisions](docs/decisions/technical_decisions.md) — Architecture decision records (D1–D22+)
+- [Decisions](docs/decisions/technical_decisions.md) — Architecture decision records (D1–D30)
 - [Patterns](docs/patterns/code_patterns.md) — Code patterns and conventions
 - [Progress](progress.json) — Current implementation status and next steps

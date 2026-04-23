@@ -13,6 +13,7 @@ from __future__ import annotations
 import html as html_lib
 import re
 from dataclasses import dataclass, field
+from uuid import UUID
 
 from loguru import logger
 from openai import AsyncOpenAI
@@ -121,7 +122,7 @@ def build_filter(
     if is_adult is not None:
         must.append(FieldCondition(key="is_adult", match=MatchValue(value=is_adult)))
 
-    return Filter(must=must) if must else None
+    return Filter(must=must) if must else None  # type: ignore[arg-type]
 
 
 # ── Core retriever ────────────────────────────────────────────────────────────
@@ -172,7 +173,8 @@ async def retrieve(
 
     docs = [
         RetrievedDoc(
-            qdrant_id=pt.id,
+            # pt.id is int | str | UUID; coerce UUID → str to satisfy the dataclass
+            qdrant_id=str(pt.id) if isinstance(pt.id, UUID) else pt.id,
             score=pt.score,
             payload=pt.payload or {},
         )

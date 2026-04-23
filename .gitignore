@@ -1,39 +1,72 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
+build/
 .venv/
 venv/
+*.pyo
 
-# Environment
+# ── Environment ───────────────────────────────────────────────────────────────
 .env
+.env.local
+.env.*.local
+# Keep .env.example (template for new devs)
 
-# Data
+# ── Data (immutable raw fetch — large files, not needed in repo) ───────────────
 backend/data/raw/*.json
+backend/data/raw/.fetch_checkpoint.json
+
+# ── Database / LangGraph state ────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# ── Docker volumes (managed by Docker, not git) ───────────────────────────────
 qdrant_data/
 
-# IDE
-.vscode/
-.idea/
+# ── Logs & PID files ──────────────────────────────────────────────────────────
+*.log
+*.pid
+.logs/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Node
+# ── Node / Next.js ────────────────────────────────────────────────────────────
 node_modules/
 .next/
 out/
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+# Keep package.json, package-lock.json, tsconfig.json etc.
 
-# Misc
-*.log
-*.sqlite
-*.db
+# ── TypeScript build cache ────────────────────────────────────────────────────
+*.tsbuildinfo
 
-# Database binary
-*.db-shm
-*.db-wal
+# ── IDE ────────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Claude.md
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*~
+
+# ── MyPy / Ruff / coverage cache ──────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ── Evaluation results (generated artifacts, not source) ─────────────────────
+backend/eval/results/
+
+# ── Media / large assets in root ─────────────────────────────────────────────
+kaguya-wpp.jpg
+
+# ── Agent-specific ────────────────────────────────────────────────────────────
 CLAUDE.md

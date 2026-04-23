@@ -206,6 +206,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
 
     async def token_generator() -> AsyncGenerator[dict, None]:
         """Yield SSE-compatible dicts for EventSourceResponse."""
+        tokens_emitted = 0
         try:
             async for event in agent.astream_events(
                 {"messages": [HumanMessage(content=body.message)]},
@@ -222,6 +223,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
                     # AIMessageChunk carries token text in .content
                     token: str = getattr(chunk, "content", "") or ""
                     if token:
+                        tokens_emitted += 1
                         yield {"data": token}
 
                 # ── Optionally log intent from router node ────────────────────
@@ -242,6 +244,53 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
             logger.exception("Agent stream error | thread={} | {}", body.thread_id, exc)
             yield {"event": "error", "data": json.dumps({"detail": str(exc)})}
             return
+
+        # ── Fetch final state (cards + fallback answer) ───────────────────────
+        try:
+            final_state = await agent.aget_state(_agent_config(body.thread_id))
+            if final_state and final_state.values:
+                intent = final_state.values.get("intent", "qa")
+
+                # Fallback: if the provider didn't stream tokens (e.g. ShopAIKey),
+                # emit the complete final_answer as a single 'answer' event so the
+                # frontend can still display the response.
+                if tokens_emitted == 0:
+                    final_answer: str = final_state.values.get("final_answer") or ""
+                    if final_answer:
+                        logger.info(
+                            "stream | no tokens emitted — sending full answer fallback "
+                            "| thread={t} | len={n}",
+                            t=body.thread_id,
+                            n=len(final_answer),
+                        )
+                        yield {"event": "answer", "data": final_answer}
+
+                # Emit anime card data
+                cards: list[dict] = []
+
+                if intent == "qa":
+                    for doc in final_state.values.get("reranked_docs", [])[:5]:
+                        payload = doc.get("payload")
+                        if payload:
+                            cards.append(payload)
+
+                elif intent == "search":
+                    tool_out = final_state.values.get("tool_output") or {}
+                    for r in (tool_out.get("data") or {}).get("results", []):
+                        payload = r.get("payload")
+                        if payload:
+                            cards.append(payload)
+
+                elif intent == "detail":
+                    tool_out = final_state.values.get("tool_output") or {}
+                    anime = (tool_out.get("data") or {}).get("anime")
+                    if anime:
+                        cards.append(anime)
+
+                if cards:
+                    yield {"event": "cards", "data": json.dumps(cards)}
+        except Exception as exc:
+            logger.warning("Could not extract card data from state: {}", exc)
 
         # Emit completion sentinel
         yield {"data": "[DONE]"}

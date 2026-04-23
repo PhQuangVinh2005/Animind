@@ -1,5 +1,14 @@
 # 🎌 AniMind v2 — Kế hoạch Chi tiết (7 ngày)
 
+> **Trạng thái hiện tại (2026-04-23):**
+> - ✅ **Ngày 1–5 hoàn thành** — Hạ tầng, RAG pipeline, LangGraph agent, FastAPI + SSE, Frontend
+> - ✅ **Streaming hoạt động** — Token-by-token qua Next.js SSE proxy (bypass Cloudflare buffering)
+> - ✅ **Markdown rendering** — `react-markdown` + `remark-gfm` + Tailwind Typography
+> - ✅ **Conversation persistence** — Per-thread message history trong `localStorage`
+> - ✅ **Code quality clean** — ESLint, TSC, Ruff, MyPy, Bandit tất cả pass
+> - 🎯 **Ưu tiên tiếp theo** — Cải thiện RAG pipeline (chunking, retrieval, reranking quality)
+> - ⏳ **Chưa làm** — RAGAS evaluation (Ngày 6), public deployment qua Cloudflare Tunnel
+
 ## Thay đổi so với v1
 
 | Hạng mục | v1 | v2 |
@@ -209,13 +218,16 @@ cloudflared tunnel run animind
 > **Deployment thay đổi:** Không dùng Vercel. Frontend chạy trực tiếp trên homeserver tại `:3000`,
 > expose qua Cloudflare Tunnel → `chat.vinhkaguya.me`. Mọi thứ (frontend + backend) trên cùng một máy.
 
-| Giờ | Công việc | Chi tiết |
-|---|---|---|
-| 1-3 | Chat UI | ChatWindow, MessageBubble, StreamingText (SSE native EventSource) |
-| 3-5 | Anime Cards | AnimeCard component, poster image, score, genres |
-| 5-6 | Dark theme + polish | Anime aesthetic, responsive basics |
-| 6-7 | Connect backend | `NEXT_PUBLIC_API_URL=https://api.vinhkaguya.me` |
-| 7-8 | Self-host + tunnel | `next build && next start`, thêm route vào cloudflared config, systemd service |
+| Giờ | Công việc | Chi tiết | Trạng thái |
+|---|---|---|---|
+| 1-3 | Chat UI | ChatWindow, MessageBubble, StreamingText | ✅ Done |
+| 3-5 | Anime Cards | AnimeCard component, poster image, score, genres | ✅ Done |
+| 5-6 | Dark theme + polish | Anime aesthetic, responsive basics | ✅ Done |
+| 6-7 | Connect backend | Next.js SSE proxy `/api/chat/stream` (bypass Cloudflare) | ✅ Done |
+| 7-8 | Self-host + tunnel | `npm run dev` (local), systemd ready for prod | ✅ Done |
+| Bonus | Markdown rendering | `react-markdown` + `remark-gfm` + Tailwind Typography | ✅ Done |
+| Bonus | Message persistence | `localStorage` per-thread, restore on session switch | ✅ Done |
+| Bonus | Flat SSE reader | While-loop callbacks thay async generator (reliable hơn) | ✅ Done |
 
 **Cloudflare Tunnel config sau Day 5:**
 ```yaml
@@ -297,15 +309,29 @@ results_without_reranker = evaluate(...)
 
 ---
 
-### Ngày 7 — Testing, Docker Compose, Documentation (8h)
+### Ngày 6 — RAGAS Evaluation *(chưa làm)*
+
+> Sẽ thực hiện sau khi RAG pipeline được cải thiện.
 
 | Giờ | Công việc | Chi tiết |
 |---|---|---|
-| 1-3 | End-to-end testing | 20 câu hỏi đa dạng, edge cases, multi-turn |
-| 3-4 | Docker Compose final | Backend + Qdrant + vLLM reranker + cloudflared |
-| 4-6 | README + báo cáo | Kiến trúc, setup guide, evaluation results, screenshots |
-| 6-7 | Demo script | 6 câu hỏi showcase mọi tính năng |
-| 7-8 | Final check | Vercel live, tunnel stable, mọi thứ chạy OK |
+| 1-2 | Tạo test set | 50 câu hỏi + ground truth answers |
+| 2-4 | RAGAS evaluation | Context Precision, Recall, Faithfulness, Answer Relevancy |
+| 4-5 | So sánh | Có reranker vs không reranker |
+| 5-6 | Ablation | Có query rewrite vs không |
+| 6-8 | Bug fixes + UI polish | Fix issues từ end-to-end testing |
+
+---
+
+### Ngày 7 — Documentation + Deployment *(một phần hoàn thành)*
+
+| Giờ | Công việc | Chi tiết | Trạng thái |
+|---|---|---|---|
+| 1-3 | End-to-end testing | 20 câu hỏi, edge cases, multi-turn | ✅ Done (local) |
+| 3-4 | Documentation | README, DEVELOPMENT.md, docs/ cập nhật | ✅ Done |
+| 4-6 | Code quality | ESLint, TSC, Ruff, MyPy, Bandit | ✅ All pass |
+| 6-7 | Demo script | 6 câu hỏi showcase | ⏳ Pending |
+| 7-8 | Public deployment | Cloudflare Tunnel expose | ⏳ Sau RAG improvement |
 
 **Docker Compose cuối cùng:**
 ```yaml
@@ -452,7 +478,29 @@ animind/
 | AniList > MAL | 90 req/min, GraphQL, no auth (MAL chỉ 1 req/s, cần OAuth) |
 | Qwen3-Reranker-0.6B > cross-encoder | Nhẹ (~2GB), vLLM serve dễ, OpenAI-compatible API |
 | Cloudflare Tunnel > ngrok | Free, stable, custom domain, no session limits |
-| Vercel > self-host frontend | Zero config, free, CDN global |
+| Self-hosted frontend > Vercel | Đơn giản hơn — cùng server, cùng tunnel, cùng systemd |
 | RAGAS > custom eval | Industry standard, đa metric, LLM-as-judge |
 | GPT-4o-mini cho dev > GPT-4o | Rẻ 30x, đủ tốt cho development/testing |
 | Cắt Hybrid Search | Reranker đã bù chất lượng retrieval |
+| Next.js SSE proxy > direct fetch | Cloudflare buffer toàn bộ response → SSE bị vỡ; proxy bypass Cloudflare |
+| localStorage persistence | Per-thread message history; restore khi switch session |
+| Flat SSE reader (while-loop) > async generator | Reliable hơn với React 18 batched updates |
+| react-markdown + remark-gfm | Render markdown citations, bold, lists từ LLM response |
+
+---
+
+## 🎯 Việc tiếp theo (RAG Pipeline Improvement)
+
+> Deployment lên public sẽ thực hiện sau khi RAG pipeline đạt chất lượng tốt.
+
+### Các hướng cải thiện RAG
+
+| Hạng mục | Mô tả | Ưu tiên |
+|---|---|---|
+| **Chunking strategy** | Thử multi-chunk (synopsis riêng, metadata riêng) | P1 |
+| **Hybrid search** | BM25 + dense vector (dù đã cắt, có thể thử lại) | P2 |
+| **Retrieval top-k** | Tăng top-20 → top-50, đo impact lên RAGAS | P1 |
+| **Reranker tuning** | Thử `max-model-len` lớn hơn cho context dài | P2 |
+| **Filter accuracy** | Cải thiện `extract_filters()` với few-shot tốt hơn | P1 |
+| **RAGAS baseline** | Chạy eval trước khi improve để có baseline | P0 |
+| **Query rewrite** | Cải thiện few-shot examples | P2 |

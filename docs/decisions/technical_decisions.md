@@ -194,16 +194,59 @@
 
 ## D27: Self-Hosted Frontend (Option B) over Vercel
 - **Decision:** Run Next.js frontend on the homeserver at `:3000` instead of deploying to Vercel
-- **Reason:** Simplicity — no third-party deployment platform, everything managed through the same Cloudflare Tunnel and systemd. Domain infrastructure already in place.
+- **Reason:** Simplicity \u2014 no third-party deployment platform, everything managed through the same Cloudflare Tunnel and systemd. Domain infrastructure already in place.
 - **Implementation:**
   - `next build && next start` runs as `animind-frontend.service` (systemd, auto-restart)
-  - `chat.vinhkaguya.me` added as a second ingress in `~/.cloudflared/config.yml` → `:3000`
-  - `api.vinhkaguya.me` remains as the backend ingress → `:8000`
+  - `chat.vinhkaguya.me` added as a second ingress in `~/.cloudflared/config.yml` \u2192 `:3000`
+  - `api.vinhkaguya.me` remains as the backend ingress \u2192 `:8000`
   - Both served through the same Cloudflare Tunnel daemon (`cloudflared-animind.service`)
 - **Trade-off vs Vercel:**
-  - ✅ No third-party dependency, no build platform to manage
-  - ✅ Simpler mental model — one server, everything managed via systemd
-  - ❌ If homeserver goes down, both frontend AND backend are unavailable (Vercel would keep frontend up)
-  - ❌ No automatic deploys on git push (need to ssh + rebuild manually)
+  - \u2705 No third-party dependency, no build platform to manage
+  - \u2705 Simpler mental model \u2014 one server, everything managed via systemd
+  - \u274c If homeserver goes down, both frontend AND backend are unavailable (Vercel would keep frontend up)
+  - \u274c No automatic deploys on git push (need to ssh + rebuild manually)
 - **Streaming:** Native `EventSource` browser API instead of Vercel AI SDK (simpler, no extra dependency)
-- **Note:** `vinhkaguya.me` (root domain) continues to show GitHub Pages portfolio — untouched.
+- **Note:** `vinhkaguya.me` (root domain) continues to show GitHub Pages portfolio \u2014 untouched.
+
+## D28: Next.js SSE Proxy to Bypass Cloudflare Buffering
+- **Problem:** Cloudflare Tunnel buffers entire HTTP responses before delivering to the browser, breaking real-time SSE streaming. Token-by-token updates arrived all at once after the full response completed.
+- **Decision:** Add a server-side Next.js API route (`/api/chat/stream`) that proxies SSE from the FastAPI backend.
+- **Why this works:** The browser talks to `localhost:3000` (or `chat.vinhkaguya.me` same-origin) — no Cloudflare in the streaming path. The Next.js route handler connects to `localhost:8000` over a direct TCP connection on the same machine.
+- **Implementation:**
+  ```ts
+  // app/api/chat/stream/route.ts
+  export const dynamic = 'force-dynamic';
+  export async function POST(req: NextRequest) {
+      const backendRes = await fetch(`${BACKEND_URL}/chat/stream`, {
+          method: 'POST', cache: 'no-store', body: req.body, ...
+      });
+      return new Response(backendRes.body, {
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', ... }
+      });
+  }
+  ```
+- **Key flags:** `cache: 'no-store'` on the fetch + `dynamic = 'force-dynamic'` on the route prevent Next.js from buffering the response body.
+- **Non-streaming calls** (health, sessions) still go directly to `api.vinhkaguya.me` via `NEXT_PUBLIC_API_URL` — no change needed there.
+- **Trade-off:** Adds one network hop on the same machine (negligible latency). Requires `BACKEND_URL` server-side env var in addition to `NEXT_PUBLIC_API_URL`.
+
+## D29: Frontend Message Persistence in localStorage
+- **Problem:** React state for messages was wiped on every `threadId` change — switching sessions showed an empty chat even if that session had previous messages.
+- **Decision:** Persist completed messages per thread in `localStorage` under the key `animind_msgs_<thread_id>`.
+- **Implementation (`lib/sessions.ts`):**
+  - `saveMessages(threadId, messages)` \u2014 called inside `setMessages` functional updater after `onDone`/`onError`, guaranteeing the latest state is saved.
+  - `loadMessages(threadId)` \u2014 called on every `threadId` change to restore history.
+  - Only `streaming: false` messages are persisted (in-flight tokens are never saved).
+  - `removeSession()` also removes `animind_msgs_<id>` (no orphaned data).
+- **Scale ceiling:** `localStorage` quota is ~5MB. At ~2KB per conversation, this supports ~2500 sessions before any issue. Gracefully fails silently on quota exceeded.
+- **Trade-off:** Messages are device-local; a different browser/device will not restore history. Acceptable for a single-user local-development setup.
+
+## D30: Flat SSE Reader (While-Loop) over Async Generator
+- **Problem:** The original `async function* readSSE()` generator caused silent failures in some browser environments when combined with React 18 batched state updates. The generator protocol overhead also introduced subtle timing issues when streaming state was split across multiple chunks.
+- **Decision:** Replace the async generator with a flat `while (true)` loop that processes chunks directly and fires callbacks (`onToken`, `onCards`, `onDone`, `onError`) inline.
+- **Key implementation details:**
+  - `currentEvent` and `currentData` persist across chunk boundaries (SSE events often span multiple reader chunks).
+  - `\r\n` line endings handled alongside `\n` (Windows-style backends).
+  - `[DONE]` sentinel breaks the outer loop cleanly.
+  - `reader.cancel()` in `finally` ensures the ReadableStream is always released.
+- **Trade-off:** Slightly more imperative code vs. the elegant generator pattern. Worth it for reliability and debuggability.
+

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 import html as html_lib
-from typing import Callable
+from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage
 from loguru import logger
@@ -26,7 +26,6 @@ from app.agent.state import AgentState
 from app.agent.tools import (
     doc_to_dict,
     get_anime_details,
-    payload_to_detail,
     search_anime,
 )
 from app.config import settings
@@ -49,7 +48,9 @@ def _last_user_text(state: AgentState) -> str:
     """Return the text of the most recent HumanMessage in state."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
-            return msg.content or ""
+            # content is str | list[str | dict] in LangChain; coerce to str
+            c = msg.content
+            return c if isinstance(c, str) else (str(c[0]) if c else "")
         if isinstance(msg, dict) and msg.get("role") == "user":
             return msg.get("content", "")
     return ""
@@ -475,7 +476,7 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
             SystemMessage,
         )
 
-        lc_messages = [SystemMessage(content=_SYSTEM_PROMPT)]
+        lc_messages: list[Any] = [SystemMessage(content=_SYSTEM_PROMPT)]
 
         for msg in _trim_and_format_history(state["messages"], max_turns=5):
             role = msg["role"]

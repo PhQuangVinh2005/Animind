@@ -24,7 +24,7 @@ import html as html_lib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, cast
 
 from loguru import logger
 from openai import AsyncOpenAI
@@ -431,12 +431,13 @@ async def rag_answer(
         async def _stream_answer() -> AsyncIterator[str]:
             response = await oai_client.chat.completions.create(
                 model=settings.openai_model,
-                messages=messages,
+                messages=cast(Any, messages),  # dict form is valid at runtime
                 temperature=0.3,
                 max_tokens=900,
                 stream=True,
             )
-            async for chunk in response:
+            # Narrow union: stream=True guarantees AsyncStream, not ChatCompletion
+            async for chunk in cast(Any, response):
                 delta = chunk.choices[0].delta.content
                 if delta:
                     yield delta
@@ -445,7 +446,7 @@ async def rag_answer(
 
     resp = await oai_client.chat.completions.create(
         model=settings.openai_model,
-        messages=messages,
+        messages=cast(Any, messages),  # dict form is valid at runtime
         temperature=0.3,
         max_tokens=900,
     )
