@@ -30,6 +30,7 @@ from app.agent.tools import (
     search_anime,
 )
 from app.config import settings
+from app.openai_client import make_chat_model
 from app.rag.chain import (
     _SYSTEM_PROMPT,
     _build_context,
@@ -300,7 +301,16 @@ If no specific title is mentioned, return the original query.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
-    """Return a dict of LangGraph node callables bound to oai_client."""
+    """Return a dict of LangGraph node callables bound to oai_client.
+
+    synthesizer_node uses a LangChain ChatOpenAI (make_chat_model()) so that
+    astream_events() emits on_chat_model_stream token events for SSE streaming.
+    All other nodes use the raw AsyncOpenAI SDK (oai_client) — they are
+    intermediate steps whose tokens we do not need to stream.
+    """
+    # LangChain Runnable for synthesizer — required for astream_events SSE.
+    # Raw AsyncOpenAI calls are invisible to LangGraph's event system.
+    chat_model = make_chat_model()
 
     # ── router_node ───────────────────────────────────────────────────────────
     async def router_node(state: AgentState) -> dict:
@@ -424,7 +434,12 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
 
     # ── synthesizer_node ──────────────────────────────────────────────────────
     async def synthesizer_node(state: AgentState) -> dict:
-        """Generate final answer from reranked_docs (qa) or tool_output (search/detail)."""
+        """Generate final answer from reranked_docs (qa) or tool_output (search/detail).
+
+        Uses LangChain ChatOpenAI (chat_model) — NOT the raw AsyncOpenAI client —
+        so that LangGraph's astream_events() captures on_chat_model_stream events
+        and the SSE endpoint can forward individual tokens to the frontend.
+        """
         intent = state.get("intent", "qa")  # type: ignore[call-overload]
         query = _last_user_text(state)
 
@@ -451,28 +466,31 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
             f"User question: {query}"
         )
 
-        # Build message list:
-        #   [SYSTEM]              static role + rules + few-shot   ← prefix-cached
-        #   [USER/ASSISTANT] ...  last 5 conversation turns         ← dynamic
-        #   [USER]                RAG context + current question    ← dynamic
-        #
-        # Injecting history lets the LLM handle comparisons, follow-ups,
-        # and cross-turn references (e.g. "which of those two has better score?").
-        history_msgs = _trim_and_format_history(state["messages"], max_turns=5)
-
-        messages_payload: list[dict] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            *history_msgs,                                  # last 5 turn-pairs
-            {"role": "user",   "content": user_message},    # current Q + RAG context
-        ]
-
-        resp = await oai_client.chat.completions.create(
-            model=settings.openai_model,
-            messages=messages_payload,
-            temperature=0.3,
-            max_tokens=900,
+        # Convert to LangChain message objects (required by ChatOpenAI.ainvoke).
+        # Order: [SYSTEM] [history pairs] [current USER+context]
+        # Using LangChain types triggers on_chat_model_stream via astream_events.
+        from langchain_core.messages import (
+            AIMessage as LCAIMessage,
+            HumanMessage as LCHumanMessage,
+            SystemMessage,
         )
-        answer = resp.choices[0].message.content or ""
+
+        lc_messages = [SystemMessage(content=_SYSTEM_PROMPT)]
+
+        for msg in _trim_and_format_history(state["messages"], max_turns=5):
+            role = msg["role"]
+            content = msg["content"]
+            if role == "user":
+                lc_messages.append(LCHumanMessage(content=content))
+            elif role == "assistant":
+                lc_messages.append(LCAIMessage(content=content))
+
+        lc_messages.append(LCHumanMessage(content=user_message))
+
+        # ainvoke() via LangChain Runnable — astream_events will capture tokens.
+        lc_response = await chat_model.ainvoke(lc_messages)
+        answer = lc_response.content or ""
+
         logger.info(
             "synthesizer: intent={i}, answer_len={n}",
             i=intent,

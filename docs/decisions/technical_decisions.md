@@ -152,3 +152,58 @@
           yield
   ```
 - **Scale ceiling:** SQLite write lock under >50 concurrent users → migrate to AsyncPostgresSaver.
+
+## D23: Cloudflare Tunnel for Backend Exposure
+- **Decision:** Use Cloudflare Tunnel (`cloudflared`) to expose the homeserver backend at `api.vinhkaguya.me`
+- **Reason:** Home router has no static IP and no open inbound ports. Cloudflare Tunnel creates an **outbound** encrypted connection from the homeserver to Cloudflare's edge — no firewall rules, no port forwarding, no DynDNS needed.
+- **Architecture:**
+  ```
+  Browser → https://api.vinhkaguya.me (Cloudflare CDN)
+                 ↓  encrypted tunnel (outbound from server)
+            cloudflared daemon (kaguyaserver)
+                 ↓  http://localhost:8000
+            uvicorn FastAPI
+  ```
+- **Domain:** `vinhkaguya.me` (Namecheap, nameservers delegated to Cloudflare)
+- **DNS:** CNAME `api.vinhkaguya.me → <tunnel-uuid>.cfargotunnel.com` (added by `cloudflared tunnel route dns`)
+- **Tunnel ID:** `80898b88-f6d7-4092-b694-01035e9c2861`
+- **Config:** `~/.cloudflared/config.yml` routes `api.vinhkaguya.me → http://localhost:8000`
+- **Credentials:** `~/.cloudflared/80898b88-...json` (keep secret)
+- **Setup script:** `scripts/setup_tunnel.sh` automates: install → login → create → route → systemd
+- **Trade-off:** Requires a domain managed by Cloudflare. Free tier has no bandwidth limit for tunnels.
+- **Bug fixed:** Tunnel ID extraction regex matched name "animind" not UUID — fixed to UUID-only pattern.
+
+## D24: Systemd for Process Management
+- **Decision:** Run uvicorn and cloudflared as systemd services (`animind-backend.service`, `cloudflared-animind.service`)
+- **Reason:** `Restart=on-failure` + `WantedBy=multi-user.target` ensures auto-recovery on crashes and auto-start on reboots
+- **Bug fixed:** Service had `WorkingDirectory` pointing to project root instead of `backend/` — uvicorn could not find `app.main`. Also `EnvironmentFile` pointed to wrong path.
+- **Log access:** `journalctl -u animind-backend -f` / `journalctl -u cloudflared-animind -f`
+- **Note:** `start.sh`/`stop.sh` are dev scripts (Docker + manual uvicorn). Production always uses systemd.
+
+## D25: Pure ASGI Middleware over Starlette BaseHTTPMiddleware
+- **Decision:** Implement all middlewares (RequestID, SecurityHeaders, RequestLogging) as raw ASGI callables
+- **Reason:** `BaseHTTPMiddleware` buffers responses and strips headers added after `call_next()`. Pure ASGI intercepts `send()` directly so headers always propagate, including on SSE streaming.
+- **Middleware registration order (LIFO):** Last added = outermost. Order: RequestID → SecurityHeaders → CORS → RequestLogging.
+- **Gotcha:** curl requires `-i` flag with `grep -i` — uvicorn lowercases all response header names.
+
+## D26: LangChain ChatOpenAI in synthesizer_node for SSE
+- **Decision:** Replace raw `AsyncOpenAI` in `synthesizer_node` with LangChain `ChatOpenAI` runnable
+- **Reason:** LangGraph `astream_events(version="v2")` only emits `on_chat_model_stream` for LangChain runnables. Raw `AsyncOpenAI` calls are invisible to the event bus — SSE endpoint gets no token deltas.
+- **SSE filter:** `POST /chat/stream` filters `on_chat_model_stream` events where `langgraph_node == "synthesizer"`.
+- **Trade-off:** Other LLM calls (filter extraction, rewriting, contextualization) stay on raw `AsyncOpenAI` for direct control.
+
+## D27: Self-Hosted Frontend (Option B) over Vercel
+- **Decision:** Run Next.js frontend on the homeserver at `:3000` instead of deploying to Vercel
+- **Reason:** Simplicity — no third-party deployment platform, everything managed through the same Cloudflare Tunnel and systemd. Domain infrastructure already in place.
+- **Implementation:**
+  - `next build && next start` runs as `animind-frontend.service` (systemd, auto-restart)
+  - `chat.vinhkaguya.me` added as a second ingress in `~/.cloudflared/config.yml` → `:3000`
+  - `api.vinhkaguya.me` remains as the backend ingress → `:8000`
+  - Both served through the same Cloudflare Tunnel daemon (`cloudflared-animind.service`)
+- **Trade-off vs Vercel:**
+  - ✅ No third-party dependency, no build platform to manage
+  - ✅ Simpler mental model — one server, everything managed via systemd
+  - ❌ If homeserver goes down, both frontend AND backend are unavailable (Vercel would keep frontend up)
+  - ❌ No automatic deploys on git push (need to ssh + rebuild manually)
+- **Streaming:** Native `EventSource` browser API instead of Vercel AI SDK (simpler, no extra dependency)
+- **Note:** `vinhkaguya.me` (root domain) continues to show GitHub Pages portfolio — untouched.

@@ -1,12 +1,31 @@
 {
-  "feature": "day3-langgraph-agent-complete",
-  "stage": "agent-complete-ready-for-day4",
-  "day": 3,
-  "last_success": "Day 3 LangGraph agent implemented and tested. Router classifies intent, rag+rerank+synthesize path working, tool path (search/detail) working, multi-turn contextual query reformulation implemented.",
-  "next_step": "Day 4: FastAPI endpoints — POST /chat, GET /chat/stream (SSE via astream_events), GET /health. Wire AsyncSqliteSaver via lifespan. Expose via Cloudflare Tunnel.",
+  "feature": "day4-complete-tunnel-active",
+  "stage": "day4-complete-tunnel-active",
+  "day": 4,
+  "last_success": "Day 4 fully complete. All local services running under systemd. animind-backend.service: active (uvicorn :8000, WorkingDirectory=backend/, EnvironmentFile=backend/.env). cloudflared-animind.service: active (tunnel 80898b88-f6d7-4092-b694-01035e9c2861 \u2192 api.vinhkaguya.me). DNS CNAME added. config.yml corrected with UUID credentials path and correct hostname.",
+  "next_step": "Day 5: Next.js frontend. Self-hosted on homeserver at :3000. Expose via chat.vinhkaguya.me Cloudflare Tunnel route. Add chat.vinhkaguya.me ingress to ~/.cloudflared/config.yml. Add animind-frontend.service systemd unit. Use NEXT_PUBLIC_API_URL=https://api.vinhkaguya.me. Native EventSource for SSE streaming (no Vercel AI SDK needed). localStorage thread_id + session restore via GET /chat/sessions/{thread_id}.",
+  "tunnel_status": {
+    "domain": "vinhkaguya.me",
+    "target_hostname": "api.vinhkaguya.me",
+    "tunnel_name": "animind",
+    "tunnel_id": "80898b88-f6d7-4092-b694-01035e9c2861",
+    "cloudflare_account": "Vinhpq.23bi14455@usth.edu.vn",
+    "nameservers_updated": true,
+    "tunnel_created": true,
+    "dns_cname_added": true,
+    "config_yml": "/home/kaguya/.cloudflared/config.yml",
+    "credentials_file": "/home/kaguya/.cloudflared/80898b88-f6d7-4092-b694-01035e9c2861.json",
+    "setup_script": "scripts/setup_tunnel.sh",
+    "systemd_backend": "animind-backend.service (active)",
+    "systemd_tunnel": "cloudflared-animind.service (active)",
+    "public_url": "https://api.vinhkaguya.me",
+    "frontend_hostname": "chat.vinhkaguya.me",
+    "frontend_port": 3000,
+    "frontend_service": "animind-frontend.service (pending Day 5)"
+  },
   "open_questions": [
-    "Memory test results pending — test `what about its score?` follow-up with new history-injection fix",
-    "SQLite persistence wired in Day 4 FastAPI lifespan (AsyncSqliteSaver)"
+    "Verify https://api.vinhkaguya.me/health once DNS fully propagates",
+    "Day 5: Next.js frontend chat UI"
   ],
   "completed": [
     "plan_v1 drafted and reviewed",
@@ -20,40 +39,57 @@
     "fetch_anilist.py expanded: 39 fields, interrupt-safe checkpointing",
     "anime.json fetched: 1250 records, 6.2MB",
     "app/config.py: ShopAIKey provider + agent_db_path added",
-    "app/openai_client.py: make_openai_client() factory with browser User-Agent",
-    "ingest.py — Strategy 5 chunking + preflight() + --reset + --limit",
+    "app/openai_client.py: make_openai_client() + make_chat_model() factories",
+    "ingest.py \u2014 Strategy 5 chunking + preflight() + --reset + --limit",
     "Day 1 verified: similarity search + reranker endpoint both passing",
-    "rag/retriever.py — RetrievedDoc, build_filter(), retrieve() + QdrantClient singleton",
-    "rag/reranker.py — async httpx rerank() via vLLM /v1/rerank",
-    "rag/chain.py — full pipeline: extract_filters → rewrite_query → retrieve → rerank → generate",
+    "rag/retriever.py \u2014 RetrievedDoc, build_filter(), retrieve() + QdrantClient singleton",
+    "rag/reranker.py \u2014 async httpx rerank() via vLLM /v1/rerank",
+    "rag/chain.py \u2014 full pipeline: extract_filters \u2192 rewrite_query \u2192 retrieve \u2192 rerank \u2192 generate",
     "Prompt engineering: structured system prompt with [1][2] citation format + 2 few-shot Q&A examples",
     "Query rewriting: 5 few-shot examples",
     "Auto-filter extraction: GPT-4o-mini + json_object + FilterParams dataclass",
     "Day 2 E2E tested and passing",
-    "agent/state.py — AgentState with 7 fields: messages, intent, retrieval_query, retrieved_docs, reranked_docs, tool_output, final_answer",
-    "agent/tools.py — search_anime() (retrieve+rerank, Qdrant-backed), get_anime_details() (anilist_id scroll + vector fallback)",
-    "agent/nodes.py — make_nodes() factory: router, rag, reranker, tool, synthesizer",
-    "agent/graph.py — build_graph() with InMemorySaver + conditional edges",
+    "agent/state.py \u2014 AgentState with 7 fields",
+    "agent/tools.py \u2014 search_anime() (retrieve+rerank), get_anime_details() (anilist_id scroll + vector fallback)",
+    "agent/nodes.py \u2014 make_nodes() factory: router, rag, reranker, tool, synthesizer (LangChain ChatOpenAI for SSE)",
+    "agent/graph.py \u2014 build_graph() with conditional edges",
     "_contextualize_query(): follow-up query resolution using last 4 turn-pairs",
     "_trim_and_format_history(): last 5 turn-pairs injected into synthesizer LLM call",
     "docs/architecture/agent.md created with full graph topology, node descriptions, state schema, memory design",
     "docs/patterns/code_patterns.md updated with LangGraph patterns",
-    "docs/decisions/technical_decisions.md updated with D18-D22"
+    "docs/decisions/technical_decisions.md updated with D18-D22",
+    "backend/app/api/schemas.py \u2014 ChatRequest (UUID4 thread_id), ChatResponse, SessionInfo (Pydantic V2)",
+    "backend/app/api/routes.py \u2014 POST /chat, POST /chat/stream (SSE astream_events v2), GET /health, GET /chat/sessions/{thread_id}",
+    "backend/app/main.py \u2014 lifespan (AsyncSqliteSaver + compiled graph), middleware stack, exception handlers, CORS",
+    "backend/app/api/exceptions.py \u2014 consistent {error,detail,request_id} envelope for HTTPException/ValidationError/500",
+    "backend/app/middleware.py \u2014 pure ASGI RequestIDMiddleware, SecurityHeadersMiddleware, RequestLoggingMiddleware",
+    "README.md updated: all Day 4 endpoints, security headers, backend structure, Cloudflare Tunnel setup",
+    "scripts/setup_tunnel.sh \u2014 installs cloudflared, creates tunnel, writes config.yml, routes DNS, installs systemd services",
+    "scripts/setup_tunnel.sh \u2014 Cloudflare Tunnel setup (bugfixes: UUID regex, WorkingDirectory, EnvironmentFile)",
+    "scripts/start.sh + stop.sh \u2014 dev lifecycle scripts (shellcheck clean)",
+    "animind-backend.service + cloudflared-animind.service \u2014 systemd services active",
+    "Cloudflare Tunnel active: api.vinhkaguya.me \u2192 tunnel 80898b88 \u2192 :8000",
+    "docs/decisions/technical_decisions.md \u2014 D23 Tunnel, D24 systemd, D25 ASGI middleware, D26 LangChain SSE",
+    "Architecture decision: Option B self-hosted frontend (no Vercel) \u2014 chat.vinhkaguya.me \u2192 :3000 via Cloudflare Tunnel",
+    "plan_v2.md updated: Day 5 \u2192 self-hosted Next.js, new architecture diagram, tunnel config with dual ingress",
+    "README.md updated: self-hosted architecture diagram, tunnel dual-route config"
   ],
   "run_order": [
     "1. docker compose up -d",
     "2. cd backend && python scripts/ingest.py --reset   # if collection empty",
-    "3. Test agent:",
-    "   python3 -c \"import asyncio; from langchain_core.messages import HumanMessage; from app.openai_client import make_openai_client; from app.agent.graph import build_graph; asyncio.run(build_graph(make_openai_client()).ainvoke({'messages': [HumanMessage(content='best action anime 2023')]}, config={'configurable': {'thread_id': 'test'}}))\"",
-    "4. Day 4: implement backend/app/api/routes.py with FastAPI endpoints"
+    "3. uvicorn app.main:app --reload --port 8000",
+    "4. Verify: curl -si http://localhost:8000/health | grep -iE 'x-request-id|x-content-type'"
   ],
   "context_pointers": [
     "plan_v2.md",
     "AGENTS.md",
+    "README.md",
     "docs/architecture/agent.md",
     "docs/decisions/technical_decisions.md",
     "docs/patterns/code_patterns.md",
     "backend/app/config.py",
+    "backend/app/main.py",
+    "backend/app/middleware.py",
     "backend/app/openai_client.py",
     "backend/app/rag/retriever.py",
     "backend/app/rag/reranker.py",
@@ -61,28 +97,52 @@
     "backend/app/agent/state.py",
     "backend/app/agent/tools.py",
     "backend/app/agent/nodes.py",
-    "backend/app/agent/graph.py"
+    "backend/app/agent/graph.py",
+    "backend/app/api/routes.py",
+    "backend/app/api/schemas.py",
+    "backend/app/api/exceptions.py",
+    "scripts/setup_tunnel.sh"
   ],
   "agent_notes": {
-    "intents": ["qa", "search", "detail"],
-    "qa_pipeline": "contextualize → extract_filters → rewrite → retrieve(20) → rerank(5) → build_context → LLM([system]+[history 5 pairs]+[context+question])",
-    "search_pipeline": "extract_filters → search_anime (retrieve+rerank) → format_tool_output → LLM",
-    "detail_pipeline": "extract_title → get_anime_details (anilist_id scroll OR vector similarity) → format_detail → LLM",
-    "checkpointer": "InMemorySaver (Day 3). AsyncSqliteSaver via FastAPI lifespan (Day 4).",
+    "intents": [
+      "qa",
+      "search",
+      "detail"
+    ],
+    "qa_pipeline": "contextualize \u2192 extract_filters \u2192 rewrite \u2192 retrieve(20) \u2192 rerank(5) \u2192 build_context \u2192 LLM([system]+[history 5 pairs]+[context+question])",
+    "search_pipeline": "extract_filters \u2192 search_anime (retrieve+rerank) \u2192 format_tool_output \u2192 LLM",
+    "detail_pipeline": "extract_title \u2192 get_anime_details (anilist_id scroll OR vector similarity) \u2192 format_detail \u2192 LLM",
+    "checkpointer": "AsyncSqliteSaver (agent_state.db). Persistent across restarts.",
     "history_window": "synthesizer: last 5 turn-pairs (10 msgs). contextualizer: last 4 turn-pairs (8 msgs).",
-    "session_id": "thread_id in LangGraph config. Frontend generates UUID, stores in localStorage (Day 5)."
+    "session_id": "thread_id UUID4 in LangGraph config. Frontend generates UUID, stores in localStorage. Day 5: chat.vinhkaguya.me (self-hosted Next.js :3000).",
+    "streaming": "synthesizer_node uses LangChain ChatOpenAI for on_chat_model_stream events. SSE via /chat/stream."
+  },
+  "middleware_stack": {
+    "order_innermost_to_outermost": [
+      "RequestLogging",
+      "CORS",
+      "SecurityHeaders",
+      "RequestID"
+    ],
+    "note": "Starlette add_middleware is LIFO. Last added = outermost = first on request.",
+    "security_headers": [
+      "x-content-type-options: nosniff",
+      "x-frame-options: DENY",
+      "x-xss-protection: 1; mode=block",
+      "referrer-policy: strict-origin-when-cross-origin",
+      "permissions-policy: camera=(), microphone=(), geolocation=()"
+    ]
   },
   "rag_pipeline_notes": {
     "retriever_top_k": 20,
     "reranker_top_k": 5,
     "embedding_model": "text-embedding-3-small (1536 dim)",
-    "chat_model": "gpt-4o-mini (dev) / gpt-4o (prod)",
+    "chat_model": "gpt-4o-mini (dev) / gpt-4o (prod) \u2014 LangChain ChatOpenAI in synthesizer for SSE",
     "reranker_model": "Qwen/Qwen3-Reranker-0.6B via vLLM",
     "auto_filter": "extract_filters() parses year/genre/format/score from natural language",
     "query_rewrite": "5 few-shot examples, identity rewrites discarded",
     "contextualize": "_contextualize_query() resolves follow-up references using history",
-    "citation_format": "[1][2] inline + Sources: footer line",
-    "streaming": "Day 4 — astream_events() via SSE endpoint"
+    "citation_format": "[1][2] inline + Sources: footer line"
   },
   "docker_notes": {
     "start": "cd ~/misa/Animind && docker compose up -d",
@@ -90,25 +150,16 @@
     "verify_qdrant": "curl -s http://localhost:6333/healthz",
     "verify_reranker": "curl -s http://localhost:8001/health"
   },
-  "day4_plan": {
-    "files": [
-      "backend/app/api/routes.py — POST /chat, GET /chat/stream, GET /health",
-      "backend/app/main.py — FastAPI app with lifespan (AsyncSqliteSaver + compiled graph)",
-      "backend/app/api/schemas.py — ChatRequest, ChatResponse Pydantic models"
-    ],
-    "key_decisions": [
-      "AsyncSqliteSaver via async context manager in lifespan",
-      "astream_events(version='v2') for SSE token streaming",
-      "thread_id from request body (not header)",
-      "CORS for frontend_url from settings"
-    ]
-  },
   "known_gotchas": [
     "qdrant-client >= 1.9: use .query_points() not .search()",
     "ShopAIKey requires User-Agent header (Cloudflare WAF)",
     "AsyncOpenAI: all methods are coroutines, must be awaited",
-    "AsyncSqliteSaver.from_conn_string() is an async context manager — NOT a direct saver. Use 'async with' in FastAPI lifespan.",
-    "InMemorySaver is used for testing (Day 3); state is lost on process restart",
-    "LangGraph thread_id MUST be passed in every ainvoke() config — without it each call is a fresh conversation"
+    "AsyncSqliteSaver.from_conn_string() is an async context manager \u2014 use 'async with' in FastAPI lifespan",
+    "LangGraph thread_id MUST be passed in every ainvoke() config \u2014 without it each call is a fresh conversation",
+    "Starlette add_middleware is LIFO \u2014 last added = outermost. Security headers must be added AFTER CORS.",
+    "grep for HTTP headers is case-sensitive; uvicorn sends lowercase. Use grep -i.",
+    "synthesizer_node uses LangChain ChatOpenAI (not raw AsyncOpenAI) so astream_events v2 can capture on_chat_model_stream",
+    "cloudflared tunnel create output: \"Created tunnel <name> with id <UUID>\" \u2014 must extract UUID not name for credentials-file path",
+    "systemd service WorkingDirectory must be backend/ not project root \u2014 uvicorn needs to import app.main"
   ]
 }

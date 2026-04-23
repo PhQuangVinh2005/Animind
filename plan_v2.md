@@ -6,7 +6,7 @@
 |---|---|---|
 | Reranker | Cắt bỏ | ✅ Qwen3-Reranker-0.6B trên vLLM (~2GB VRAM) |
 | Retrieval Eval | Không có | ✅ RAGAS (Context Precision/Recall/Relevancy) |
-| Deployment | Chỉ local | ✅ Vercel (frontend) + Cloudflare Tunnel (backend) |
+| Deployment | Chỉ local | ✅ Self-hosted (frontend + backend) trên homeserver qua Cloudflare Tunnel |
 | Hybrid Search | Giữ | ❌ Cắt — reranker đã bù chất lượng |
 | MAL API | Không dùng | Không dùng (AniList 90 req/min >> MAL 1 req/s) |
 | LangGraph | OSS local | OSS local — MIT, không giới hạn |
@@ -16,45 +16,37 @@
 ## 🏗️ Kiến trúc tổng thể
 
 ```
-                    ┌──────────────┐
-                    │   Vercel     │  (free tier)
-                    │  Next.js UI  │
-                    └──────┬───────┘
-                           │ HTTPS
-                    ┌──────▼───────┐
-                    │  Cloudflare  │  (free tunnel)
-                    │   Tunnel     │
-                    └──────┬───────┘
-                           │
-  ╔════════════════════════▼═══════════════════════════╗
-  ║              HOMESERVER (Debian)                    ║
-  ║  RTX 5060Ti 16GB · R7 5700X · 32GB RAM             ║
-  ║                                                     ║
-  ║  ┌─────────────────────────────────────────────┐   ║
-  ║  │           FastAPI Backend (:8000)            │   ║
-  ║  │  ┌───────────────────────────────────────┐  │   ║
-  ║  │  │         LangGraph Agent               │  │   ║
-  ║  │  │  [START] → Router                     │  │   ║
-  ║  │  │     ├── RAG Node → Reranker → Answer  │  │   ║
-  ║  │  │     └── Tool Node → Answer            │  │   ║
-  ║  │  │                         → [END]       │  │   ║
-  ║  │  └───────────────────────────────────────┘  │   ║
-  ║  │  Tools: search_anime · get_details          │   ║
-  ║  └──────────┬──────────────────┬───────────────┘   ║
-  ║             │                  │                    ║
-  ║  ┌──────────▼──────┐  ┌───────▼────────────┐      ║
-  ║  │ Qdrant (Docker)  │  │ AniList GraphQL    │      ║
-  ║  │ :6333 · ~20k     │  │ (live, 90 req/min) │      ║
-  ║  └─────────────────┘  └────────────────────┘      ║
-  ║                                                     ║
-  ║  ┌──────────────────────────────────┐              ║
-  ║  │ vLLM Reranker (:8001)            │              ║
-  ║  │ Qwen3-Reranker-0.6B (~2GB VRAM) │              ║
-  ║  └──────────────────────────────────┘              ║
-  ╚═════════════════════════════════════════════════════╝
+  Browser → https://chat.vinhkaguya.me          Browser → https://api.vinhkaguya.me
+                    │                                              │
+         ┌──────────▼──────────────────────────────────────────────▼──────────┐
+         │                    Cloudflare CDN + Tunnel                         │
+         │          (vinhkaguya.me nameservers → Cloudflare)                  │
+         └──────────┬──────────────────────────────────────────────┬──────────┘
+                    │ chat.vinhkaguya.me → :3000                   │ api.vinhkaguya.me → :8000
+  ╔═════════════════▼══════════════════════════════════════════════▼═══════════╗
+  ║                         HOMESERVER (Debian)                                ║
+  ║           RTX 5060Ti 16GB · R7 5700X · 32GB RAM                           ║
+  ║                                                                            ║
+  ║  ┌─────────────────────────┐   ┌─────────────────────────────────────┐    ║
+  ║  │  Next.js Frontend (:3000)│   │      FastAPI Backend (:8000)         │    ║
+  ║  │  Chat UI + SSE client   │   │  ┌───────────────────────────────┐   │    ║
+  ║  └─────────────────────────┘   │  │       LangGraph Agent         │   │    ║
+  ║                                │  │  [START] → Router             │   │    ║
+  ║                                │  │  ├── RAG → Reranker → Answer  │   │    ║
+  ║                                │  │  └── Tool Node → Answer       │   │    ║
+  ║                                │  │                    → [END]    │   │    ║
+  ║                                │  └───────────────────────────────┘   │    ║
+  ║                                │  Tools: search_anime · get_details   │    ║
+  ║                                └──────────┬───────────────────────────┘    ║
+  ║                                           │                                ║
+  ║  ┌──────────────────────┐  ┌─────────────▼────────┐  ┌──────────────────┐ ║
+  ║  │  Qdrant (Docker)     │  │  vLLM Reranker       │  │  AniList GraphQL │ ║
+  ║  │  :6333 · ~1250 vecs  │  │  :8001 · Qwen3-0.6B  │  │  (live API)      │ ║
+  ║  └──────────────────────┘  └──────────────────────┘  └──────────────────┘ ║
+  ╚════════════════════════════════════════════════════════════════════════════╝
 
   VRAM Budget: Reranker ~2GB / 16GB available = OK
-  RAM Budget:  Qdrant ~200MB + FastAPI ~500MB + vLLM ~2GB / 32GB = OK
+  RAM Budget:  Qdrant ~200MB + FastAPI ~500MB + vLLM ~2GB + Next.js ~200MB / 32GB = OK
 ```
 
 ---
@@ -212,30 +204,50 @@ cloudflared tunnel run animind
 
 ---
 
-### Ngày 5 — Next.js Frontend + Deploy Vercel (8h)
+### Ngày 5 — Next.js Frontend + Self-Host trên Homeserver (8h)
+
+> **Deployment thay đổi:** Không dùng Vercel. Frontend chạy trực tiếp trên homeserver tại `:3000`,
+> expose qua Cloudflare Tunnel → `chat.vinhkaguya.me`. Mọi thứ (frontend + backend) trên cùng một máy.
 
 | Giờ | Công việc | Chi tiết |
 |---|---|---|
-| 1-3 | Chat UI | ChatWindow, MessageBubble, StreamingText (dùng Vercel AI SDK) |
+| 1-3 | Chat UI | ChatWindow, MessageBubble, StreamingText (SSE native EventSource) |
 | 3-5 | Anime Cards | AnimeCard component, poster image, score, genres |
 | 5-6 | Dark theme + polish | Anime aesthetic, responsive basics |
-| 6-7 | Connect backend | Point API calls → `api.yourdomain.com` |
-| 7-8 | Deploy Vercel | `vercel deploy`, env vars, production build |
+| 6-7 | Connect backend | `NEXT_PUBLIC_API_URL=https://api.vinhkaguya.me` |
+| 7-8 | Self-host + tunnel | `next build && next start`, thêm route vào cloudflared config, systemd service |
+
+**Cloudflare Tunnel config sau Day 5:**
+```yaml
+tunnel: 80898b88-f6d7-4092-b694-01035e9c2861
+credentials-file: ~/.cloudflared/80898b88-....json
+
+ingress:
+  - hostname: chat.vinhkaguya.me
+    service: http://localhost:3000
+  - hostname: api.vinhkaguya.me
+    service: http://localhost:8000
+  - service: http_status:404
+```
+
+**Systemd service thêm:**
+- `animind-frontend.service` — `next start` trên `:3000`, WorkingDirectory=frontend/
 
 **Components (ưu tiên):**
 
 | Priority | Component | Bắt buộc |
 |---|---|---|
 | P0 | ChatWindow + MessageBubble | ✅ |
-| P0 | StreamingText (Vercel AI SDK) | ✅ |
+| P0 | StreamingText (native EventSource) | ✅ |
 | P1 | AnimeCard | ✅ |
 | P2 | Suggested questions | Nice-to-have |
 | P3 | SearchBar + autocomplete | Cắt |
 
 **Deliverables:**
-- Frontend live tại `animind.vercel.app` (hoặc tương tự)
+- Frontend live tại `https://chat.vinhkaguya.me`
 - Chat + streaming hoạt động end-to-end
 - Dark theme, anime cards hiển thị đúng
+- `animind-frontend.service` chạy như systemd service
 
 ---
 
