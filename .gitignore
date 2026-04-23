@@ -67,7 +67,3 @@ backend/eval/results/
 
 # ── Media / large assets in root ─────────────────────────────────────────────
 kaguya-wpp.jpg
-
-# ── Agent-specific ────────────────────────────────────────────────────────────
-.gitnexus
-.claude
