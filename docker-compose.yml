@@ -1,6 +1,17 @@
-# AniMind Docker Compose — Qdrant + vLLM Reranker
-# Usage: docker compose up -d
-# Verify: docker compose ps && curl localhost:6333/healthz && curl localhost:8001/health
+# AniMind Docker Compose — Full Stack
+#
+# Services:
+#   Infrastructure (always start):  qdrant, reranker, nginx, dozzle
+#   Backend  (--profile backend):   FastAPI backend
+#   Frontend (--profile frontend):  Next.js frontend
+#
+# Usage:
+#   docker compose --profile backend --profile frontend up -d   # start all
+#   docker compose --profile backend up -d                      # backend + infra
+#   docker compose stop backend                                 # stop backend only
+#   docker compose --profile backend --profile frontend down    # stop everything
+#
+# Logs:  http://localhost:9999 (Dozzle)
 
 services:
   # ── Qdrant Vector Database ──────────────────────────────────────
@@ -15,7 +26,8 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      # Qdrant image has no curl/wget — use bash TCP check
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -84,11 +96,111 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  # ── NGINX Reverse Proxy ─────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: animind-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+        required: false
+      frontend:
+        condition: service_healthy
+        required: false
+    networks:
+      - animind
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Dozzle (Log Viewer) ─────────────────────────────────────────
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: animind-dozzle
+    ports:
+      - "127.0.0.1:9999:8080"   # localhost-only access
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - animind
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  # ── FastAPI Backend ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: animind-backend
+    profiles:
+      - backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override paths for Docker networking
+      - QDRANT_URL=http://qdrant:6333
+      - RERANKER_URL=http://reranker:8001
+      - AGENT_DB_PATH=/app/data/agent_state.db
+      - FRONTEND_URL=https://chat.vinhkaguya.me
+    volumes:
+      - agent_data:/app/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      reranker:
+        condition: service_healthy
+    networks:
+      - animind
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Next.js Frontend ────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://api.vinhkaguya.me
+    container_name: animind-frontend
+    profiles:
+      - frontend
+    environment:
+      # Server-side: SSE proxy reaches backend via Docker DNS
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+        required: false
+    networks:
+      - animind
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 # ── Named Volumes ───────────────────────────────────────────────
 volumes:
   qdrant_data:
     driver: local
   huggingface_cache:
+    driver: local
+  agent_data:
     driver: local
 
 # ── Network ─────────────────────────────────────────────────────

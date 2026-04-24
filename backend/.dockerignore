@@ -1,0 +1,39 @@
+# Dependencies and caches
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+.logs/
+
+# Evaluation data (not needed in production container)
+eval/results/
+eval/factscore_db/
+
+# Raw data (only needed for ingestion, not runtime)
+data/raw/
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Env files (mounted at runtime, not baked into image)
+.env
+.env.*

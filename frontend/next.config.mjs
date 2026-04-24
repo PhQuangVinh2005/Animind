@@ -1,5 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Standalone output for Docker production builds — produces a self-contained
+  // server.js that doesn't need node_modules at runtime.
+  output: 'standalone',
   images: {
     remotePatterns: [
       {

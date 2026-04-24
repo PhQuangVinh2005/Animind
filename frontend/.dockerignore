@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build output (rebuilt in container)
+.next/
+out/
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Env files (passed at build/runtime, not baked)
+.env
+.env.*
+
+# Misc
+*.md
+LICENSE

@@ -1,6 +1,6 @@
 # AniMind Frontend
 
-Next.js 14 chat interface for the AniMind RAG chatbot.
+Next.js 14 chat interface for the AniMind RAG chatbot. Self-hosted on the homeserver at `:3000`, exposed via Cloudflare Tunnel at `chat.vinhkaguya.me`.
 
 > See [../../DEVELOPMENT.md](../../DEVELOPMENT.md) for the full developer guide.
 
@@ -18,6 +18,13 @@ Next.js 14 chat interface for the AniMind RAG chatbot.
 
 npm install
 npm run dev     # http://localhost:3000
+```
+
+## Production (self-hosted)
+
+```bash
+npm run build
+npm run start   # :3000, managed by animind-frontend.service systemd unit
 ```
 
 ## Environment
@@ -46,6 +53,6 @@ BACKEND_URL=http://localhost:8000           # server-side proxy target (SSE)
 
 ```bash
 npm run lint          # ESLint (next lint)
-npx tsc --noEmit      # TypeScript
-npm audit --audit-level=high
+npx tsc --noEmit      # TypeScript strict check
+npm audit --audit-level=high  # Dependency security
 ```
