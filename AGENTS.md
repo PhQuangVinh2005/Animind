@@ -23,16 +23,21 @@ AniMind — Anime/Manga RAG Chatbot with LangGraph Agent, Qdrant hybrid search (
 - RAM budget: Qdrant ~200MB + FastAPI ~500MB + vLLM ~2GB + Next.js ~200MB / 32GB
 
 ## Commands
-- Backend dev: `cd backend && uvicorn app.main:app --reload --port 8000`
-- Frontend dev: `cd frontend && npm run dev`
-- Docker services: `docker compose up -d` (Qdrant + vLLM reranker)
-- Data ingestion: `cd backend && python scripts/ingest.py`  *(dual-vector: dense + BM25)*
-- Fetch data: `cd backend && python scripts/fetch_anilist.py`
+- Start all: `bash scripts/start-all.sh [--build]`
+- Stop all: `bash scripts/stop-all.sh`
+- Backend only: `bash scripts/start-backend.sh [--build]`
+- Frontend only: `bash scripts/start-frontend.sh [--build]`
+- Rebuild: `bash scripts/rebuild.sh [backend|frontend]`
+- Backend dev (no Docker): `cd backend && uvicorn app.main:app --reload --port 8000`
+- Frontend dev (no Docker): `cd frontend && npm run dev`
+- Data ingestion: `docker exec animind-backend python scripts/ingest.py`
+- Fetch data: `docker exec animind-backend python scripts/fetch_anilist.py`
 - Collect eval: `cd backend && conda run -n animind python eval/collect.py --pipeline all`
 - FActScore eval: `conda run -n factscore python eval/factscore_runner.py --input eval/results/raw_baseline.json --output eval/results/factscore_baseline_v1.json --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0`
 - RAGAS eval: `cd backend && conda run -n animind python eval/evaluate.py --tag v1`
 - Rebuild KB: `cd backend && conda run -n animind python eval/build_factscore_db.py`
 - Tunnel: `cloudflared tunnel run animind`
+- Logs: `http://127.0.0.1:9999` (Dozzle, local-only)
 
 ## Conda Environments
 - `animind` — main backend env (Python 3.11, FastAPI, LangGraph, RAGAS, collect.py)
@@ -79,10 +84,10 @@ Relevance gate threshold: 0.4 (top reranker score). On retry, rag_node drops fil
 - AniList GraphQL: `https://graphql.anilist.co`
 
 ## DON'T
-- KHÔNG commit `.env` — dùng `.env.example`
-- KHÔNG dùng `requests` library — dùng `httpx`
-- KHÔNG dùng `print()` — dùng `loguru`
-- KHÔNG sửa `data/raw/` sau khi fetch xong — đây là immutable raw data
-- KHÔNG hardcode model names — đặt trong config
-- KHÔNG chạy `factscore_runner.py` trong `animind` env — dùng `factscore` env (openai<1.0)
-- KHÔNG mix animind/factscore environments trong cùng 1 subprocess call
+- Do NOT commit `.env` — use `.env.example`
+- Do NOT use `requests` library — use `httpx`
+- Do NOT use `print()` — use `loguru`
+- Do NOT modify `data/raw/` after fetching — immutable raw data
+- Do NOT hardcode model names — put them in config
+- Do NOT run `factscore_runner.py` in `animind` env — use `factscore` env (openai<1.0)
+- Do NOT mix animind/factscore environments in the same subprocess call

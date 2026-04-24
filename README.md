@@ -1,310 +1,344 @@
-# AniMind — Anime/Manga RAG Chatbot
+# AniMind
 
-An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant hybrid search (dense + BM25), Qwen3 reranker, self-correcting retrieval, and GPT-4o-mini. Ask natural language questions about anime and get grounded, accurate answers with real-time streaming.
+Anime/Manga RAG chatbot powered by a self-correcting LangGraph agent, Qdrant hybrid search, and a local Qwen3 reranker.
 
-> **Status:** Local development — not yet exposed publicly. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full developer guide.
+**Live:** [chat.vinhkaguya.me](https://chat.vinhkaguya.me) · **API:** [api.vinhkaguya.me](https://api.vinhkaguya.me)
 
-## Features
+---
 
-- **RAG-powered Q&A** — Answers grounded in AniList data via hybrid search + reranking
-- **Hybrid Search** — Qdrant native dual-vector (dense + BM25 sparse) with Reciprocal Rank Fusion (RRF)
-- **Self-Correcting Retrieval** — Relevance gate checks reranker score (threshold 0.4); retries without filters on low relevance (max 1 retry)
-- **Strategy 5 Chunking** — Structured single-chunk per anime: Titles → Genres → Tags → Synopsis → Metadata
-- **Metadata Filtering** — Pre-filter by year, genre, score, format before vector search
-- **Reranking** — Qwen3-Reranker-0.6B (local, zero cost) for improved retrieval quality
-- **Multi-turn Memory** — Persistent conversation history via LangGraph + SQLite checkpointer
-- **Real-time SSE Streaming** — Token-by-token streaming via Next.js proxy route (bypasses Cloudflare buffering)
-- **Markdown Rendering** — Assistant responses rendered as rich markdown (bold, lists, code, citations)
-- **Conversation Persistence** — Per-thread message history stored in localStorage; survives page refresh and session switching
-- **Security Headers** — OWASP hardened headers (X-Content-Type-Options, X-Frame-Options, etc.)
-- **Request Tracing** — UUID4 `X-Request-ID` on every request/response for log correlation
-- **Evaluation** — FActScore (factual precision) + RAGAS (retrieval quality) with versioned pipeline registry (`baseline`, `ragv1`, …)
-
-## Quick Start
-
-```bash
-# 1. Clone and setup
-git clone <repo-url>
-cd Animind
-
-# 2. Copy and fill env file
-cp .env.example backend/.env
-# Edit backend/.env — add SHOPAIKEY_API_KEY
-
-# 3. Configure frontend env
-cat > frontend/.env.local << 'EOF'
-NEXT_PUBLIC_API_URL=http://localhost:8000
-BACKEND_URL=http://localhost:8000
-EOF
-
-# 4. Start all infrastructure (Qdrant + vLLM reranker + FastAPI backend)
-bash scripts/start.sh
-
-# 5. Fetch + ingest data (first time only)
-cd backend
-conda activate animind
-python scripts/fetch_anilist.py        # fetches ~1250 anime records
-python scripts/ingest.py               # embeds + upserts to Qdrant
-
-# 6. Start frontend dev server
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend: **http://localhost:3000** | API Docs: **http://localhost:8000/docs**
-
-> See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed setup, daily workflow, and troubleshooting.
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Liveness + Qdrant/reranker probe |
-| `POST` | `/chat` | Blocking full-response chat |
-| `POST` | `/chat/stream` | SSE token-by-token streaming |
-| `GET` | `/chat/sessions/{thread_id}` | SQLite persistence probe |
-
-### Chat request format
-
-```bash
-# Blocking
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id":"550e8400-e29b-41d4-a716-446655440000","message":"best action anime 2023"}'
-
-# Streaming (SSE)
-curl -N -X POST http://localhost:8000/chat/stream \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id":"550e8400-e29b-41d4-a716-446655440000","message":"best action anime 2023"}'
-```
-
-`thread_id` must be a valid **UUID4**. Each unique thread_id has its own persistent conversation history.
-
-### Error envelope
-
-All errors use a consistent format:
-```json
-{
-  "error": "validation_error",
-  "detail": "thread_id: must be a valid UUID4",
-  "request_id": "5f597164-fbf2-4c51-a534-cf51736e82e7"
-}
-```
-
-## Data Pipeline
-
-```
-AniList GraphQL API
-      ↓
-fetch_anilist.py          → data/raw/anime.json  (39 fields, ~1250 records)
-      ↓
-ingest.py (process_anime)
-  ├── clean_html()        → strip HTML, remove (Source: ...) citations
-  ├── chunk text          → Titles. Genres. Tags (rank≥70). Synopsis. Metadata.
-  ├── dense embed         → text-embedding-3-small (1536d) via ShopAIKey
-  ├── sparse embed        → fastembed BM25 (Qdrant/bm25)
-  └── upsert              → Qdrant collection "anime" (named vectors: dense + bm25)
-                            payload: title, cover, score, genres, tags, full_data
-```
-
-## Ingest Commands
-
-```bash
-cd backend
-
-# Test run (10 records)
-python scripts/ingest.py --limit 10
-
-# Full clean ingest (drops + recreates collection)
-python scripts/ingest.py --reset
-
-# Incremental upsert (update existing, add new)
-python scripts/ingest.py
-
-# Verify collection
-curl -s http://localhost:6333/collections/anime | python3 -m json.tool
-```
-
-## Docker Services
-
-### Start / Stop
-
-```bash
-cd ~/misa/Animind
-
-docker compose up -d        # start Qdrant + vLLM reranker
-docker compose down         # stop all
-docker compose logs -f      # all logs
-```
-
-### Kill stale Next.js
-```bash
-pkill -f "next"
-```
-
-### Verify Health
-
-```bash
-# Qdrant
-curl -s http://localhost:6333/healthz
-
-# Reranker
-curl -s http://localhost:8001/health
-
-# Backend (includes dependency probe)
-curl -s http://localhost:8000/health | python3 -m json.tool
-```
-
-### Container Details
-
-| Service | Image | Port | Resource |
-|---|---|---|---|
-| Qdrant | `qdrant/qdrant:v1.17.1` | `:6333` REST, `:6334` gRPC | 512M RAM |
-| Reranker | `vllm/vllm-openai:v0.19.1` | `:8001` | ~2GB VRAM, 4G RAM |
-
-### Port Forward (laptop → kaguyaserver)
-
-Run **on your laptop** to access all services locally:
-
-```bash
-ssh -N \
-  -L 3000:localhost:3000 \
-  -L 6333:localhost:6333 \
-  -L 6334:localhost:6334 \
-  -L 8000:localhost:8000 \
-  -L 8001:localhost:8001 \
-  kaguya@kaguyaserver
-```
-
-After connecting, access from your laptop:
-- `http://localhost:3000` — Next.js frontend
-- `http://localhost:6333/dashboard` — Qdrant Web UI
-- `http://localhost:8000/docs` — FastAPI Swagger UI
-- `http://localhost:8001/health` — vLLM Reranker
-
-## Architecture
-
-### Current (Local Development)
-
-```
-Browser (localhost:3000)
-    │
-    │  POST /api/chat/stream    ← Next.js SSE proxy (bypasses Cloudflare buffering)
-    ▼
-Next.js Dev Server (:3000)
-    │
-    │  POST /chat/stream        ← server-to-server, direct TCP
-    ▼
-FastAPI + LangGraph (:8000)
-    ├── Router node         — GPT-4o-mini intent classification
-    ├── RAG node            — extract_filters → rewrite_query → hybrid retrieve top-20
-    ├── Rerank node         — Qwen3-Reranker-0.6B → top-5 + top_rerank_score
-    ├── Relevance Gate      — score ≥ 0.4 → synthesize; score < 0.4 → retry (max 1)
-    ├── Tool node           — search_anime / get_anime_details
-    └── Synthesizer         — GPT-4o-mini streams answer via SSE
-         ├── Qdrant (:6333)          — vector DB (hybrid: dense + BM25)
-         └── vLLM Reranker (:8001)   — local reranker
-```
-
-### Planned (Future — after RAG pipeline improvements)
-
-```
-Browser → https://chat.vinhkaguya.me  (Cloudflare CDN)
-               ↓ tunnel
-         cloudflared daemon → http://localhost:3000 (Next.js)
-
-Browser → https://api.vinhkaguya.me   (Cloudflare CDN)
-               ↓ tunnel
-         cloudflared daemon → http://localhost:8000 (FastAPI)
-```
-
-## Backend Structure
-
-```
-backend/app/
-├── main.py               # FastAPI app, lifespan (AsyncSqliteSaver + agent)
-├── config.py             # Pydantic Settings from .env
-├── openai_client.py      # make_openai_client() + make_chat_model() factories
-├── middleware.py         # RequestID, SecurityHeaders, RequestLogging (pure ASGI)
-├── api/
-│   ├── routes.py         # /health, /chat, /chat/stream, /chat/sessions/{id}
-│   ├── schemas.py        # ChatRequest (UUID4 thread_id), ChatResponse, SessionInfo
-│   └── exceptions.py     # Consistent {error, detail, request_id} envelope
-├── agent/
-│   ├── state.py          # AgentState (TypedDict) — +retry_count, top_rerank_score
-│   ├── nodes.py          # make_nodes() — router, rag, reranker, relevance_gate, tool, synthesizer
-│   ├── tools.py          # search_anime(), get_anime_details()
-│   └── graph.py          # build_graph() — LangGraph StateGraph
-└── rag/
-    ├── chain.py           # Full RAG pipeline + system prompt
-    ├── retriever.py       # retrieve() — Qdrant hybrid search (dense + BM25 RRF)
-    └── reranker.py        # rerank() — vLLM /v1/rerank
-```
-
-## Tech Stack
+## Stack
 
 | Layer | Technology |
 |---|---|
-| LLM | GPT-4o-mini (synthesizer via LangChain ChatOpenAI) |
-| Embedding | text-embedding-3-small via ShopAIKey |
-| Vector DB | Qdrant v1.17.1 |
-| Reranker | Qwen3-Reranker-0.6B (vLLM v0.19.1, local) |
-| Agent | LangGraph + LangChain |
-| Checkpointer | AsyncSqliteSaver (persistent across restarts) |
-| Backend | FastAPI + SSE (sse-starlette) |
-| Frontend | Next.js 14 (self-hosted, `next start` on homeserver) |
-| Tunnel | Cloudflare Tunnel — `chat.vinhkaguya.me` (:3000) + `api.vinhkaguya.me` (:8000) |
-| Evaluation | FActScore (factual precision) + RAGAS (retrieval quality) |
-| Data Source | AniList GraphQL API |
+| **LLM** | GPT-4o-mini (via OpenAI-compatible API) |
+| **Embeddings** | text-embedding-3-small (1536d) |
+| **Vector DB** | Qdrant v1.17.1 (dense + BM25 sparse vectors) |
+| **Reranker** | Qwen3-Reranker-0.6B via vLLM v0.19.1 (local, ~2GB VRAM) |
+| **Agent** | LangGraph StateGraph with SQLite checkpointer |
+| **Backend** | FastAPI + SSE streaming |
+| **Frontend** | Next.js 14 (standalone production build) |
+| **Infra** | Docker Compose + NGINX reverse proxy + Cloudflare Tunnel |
+| **Evaluation** | FActScore (atomic fact verification) + RAGAS (retrieval quality) |
+| **Data source** | AniList GraphQL API (~1,250 anime records) |
 
-## Environment Variables
+---
 
-See `.env.example` for full reference. Key variables:
+## RAG Pipeline
 
-| Variable | Description | Default |
+### Agent Topology
+
+```
+[START]
+   │
+   ▼
+ router ─── GPT-4o-mini intent classifier (qa / search / detail)
+   │
+   ├─ "qa"     → rag → reranker → relevance_gate ──┐
+   │              ↑                     │            │
+   │              └── retry (max 1) ────┘            ▼
+   │                                           synthesizer → [END]
+   │
+   ├─ "search" → tool → synthesizer → [END]
+   │
+   └─ "detail" → tool → synthesizer → [END]
+```
+
+### QA Pipeline — Node-by-Node I/O
+
+The QA path is the core RAG pipeline. Each node reads from and writes to a shared `AgentState`.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  USER MESSAGE: "What's the score of Clannad: After Story?"             │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                ▼
+┌─ router_node ────────────────────────────────────────────────────────────┐
+│  In:  last user message                                                  │
+│  LLM: GPT-4o-mini, 10 few-shot examples, response_format=json_object    │
+│  Out: intent = "qa"                                                      │
+└──────────────────────────────┬───────────────────────────────────────────┘
+                               ▼
+┌─ rag_node ───────────────────────────────────────────────────────────────┐
+│  Step 1 — Contextualize (multi-turn only)                                │
+│    In:  last message + conversation history (last 4 turn-pairs)          │
+│    LLM: GPT-4o-mini, 3 few-shot examples                                │
+│    Out: self-contained query (e.g. "score of Clannad: After Story")      │
+│                                                                          │
+│  Step 2 — Extract Filters  [skipped on retry]                            │
+│    In:  contextualized query                                             │
+│    LLM: GPT-4o-mini, response_format=json_object                        │
+│    Out: FilterParams {genres, year, format, score_min, ...}              │
+│                                                                          │
+│  Step 3 — Query Rewrite  [skipped on retry]                              │
+│    In:  contextualized query                                             │
+│    LLM: GPT-4o-mini, 5 few-shot examples                                │
+│    Out: keyword-enriched query for embedding                             │
+│                                                                          │
+│  Step 4 — Hybrid Retrieve (top-20)                                       │
+│    In:  rewritten query + FilterParams                                   │
+│    Qdrant: dual Prefetch (dense 1536d + BM25 sparse) → RRF fusion        │
+│    Out: 20 scored document dicts {title, chunk_text, payload, score}      │
+└──────────────────────────────┬───────────────────────────────────────────┘
+                               ▼
+┌─ rerank_node ────────────────────────────────────────────────────────────┐
+│  In:  20 retrieved docs + retrieval query                                │
+│  HTTP: POST vLLM /v1/rerank (Qwen3-Reranker-0.6B, local GPU)            │
+│  Out: top-5 reranked docs + top_rerank_score (best relevance score)      │
+└──────────────────────────────┬───────────────────────────────────────────┘
+                               ▼
+┌─ relevance_gate_node ────────────────────────────────────────────────────┐
+│  In:  top_rerank_score + retry_count                                     │
+│  Logic:                                                                  │
+│    score >= 0.4         → PASS → synthesizer                             │
+│    score <  0.4, try=0  → RETRY → rag_node (no filters, no rewrite)      │
+│    score <  0.4, try=1  → PASS (exhausted) → synthesizer                 │
+│  Out: retry_count++                                                      │
+└──────────────────────────────┬───────────────────────────────────────────┘
+                               ▼
+┌─ synthesizer_node ───────────────────────────────────────────────────────┐
+│  In:  reranked_docs (5) + conversation history (5 turn-pairs)            │
+│  LLM: ChatOpenAI (GPT-4o-mini), streamed via LangChain runnable         │
+│  Prompt:                                                                 │
+│    [SYSTEM]  static prompt (>1024 tok, prefix-cached) + format rules     │
+│    [HISTORY] last 5 turn-pairs from conversation                         │
+│    [USER]    context passages [1]...[5] + user question                   │
+│  Out: final_answer (markdown with [1][2] citations) — streamed via SSE   │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Search / Detail Paths
+
+| Path | `tool_node` behavior | Synthesizer input |
 |---|---|---|
-| `SHOPAIKEY_API_KEY` | API key for ShopAIKey (OpenAI-compatible) | required |
-| `SHOPAIKEY_BASE_URL` | Provider base URL | `https://api.shopaikey.com/v1` |
-| `OPENAI_MODEL` | Chat model name | `gpt-4o-mini` |
-| `QDRANT_URL` | Qdrant REST endpoint | `http://localhost:6333` |
-| `QDRANT_COLLECTION` | Collection name | `anime` |
-| `RERANKER_URL` | vLLM reranker endpoint | `http://localhost:8001` |
-| `AGENT_DB_PATH` | SQLite file for conversation state | `agent_state.db` |
-| `FRONTEND_URL` | Allowed CORS origin | `http://localhost:3000` |
+| **search** | `extract_filters()` → `retrieve(top_k=20)` → `rerank(top_k=5)` | Formatted anime list |
+| **detail** | Extract title → `scroll()` by ID or `retrieve(top_k=1)` fallback | Full anime profile |
 
-## Cloudflare Tunnel (Production)
+---
 
-The backend and frontend are both exposed via the same Cloudflare Tunnel (no port forwarding needed):
+## Quick Start
 
-```bash
-# ~/.cloudflared/config.yml (after Day 5)
-tunnel: 80898b88-f6d7-4092-b694-01035e9c2861
-credentials-file: /home/kaguya/.cloudflared/80898b88-...json
+### Prerequisites
 
-ingress:
-  - hostname: chat.vinhkaguya.me
-    service: http://localhost:3000    # Next.js frontend
-  - hostname: api.vinhkaguya.me
-    service: http://localhost:8000    # FastAPI backend
-  - service: http_status:404
-```
+- Docker Engine 24+ with Compose v2
+- NVIDIA GPU with 4GB+ VRAM (for the reranker)
+- An OpenAI-compatible API key (set in `backend/.env`)
+
+### 1. Clone and configure
 
 ```bash
-# One-time setup (already done for api.vinhkaguya.me):
-ANIMIND_HOSTNAME="api.vinhkaguya.me" bash scripts/setup_tunnel.sh
+git clone https://github.com/PhQuangVinh2005/Animind.git
+cd Animind
 
-# Service management
-sudo systemctl status animind-backend cloudflared-animind
-journalctl -u animind-backend -u cloudflared-animind -f
+# Interactive env setup (prompts for API keys, writes to backend/.env)
+python scripts/setup_env.py
+
+# Or manually: cp backend/.env.example backend/.env && edit backend/.env
 ```
 
-## Documentation
+### 2. Start everything
 
-- [DEVELOPMENT.md](DEVELOPMENT.md) — Developer guide: setup, workflow, design decisions, smoke tests, troubleshooting
-- [FActScore Eval Guide](backend/eval/README.md) — Evaluation pipeline: FActScore + RAGAS, pipeline registry, CLI reference
-- [Plan v3](plan_v3.md) — RAG improvement roadmap (hybrid search, agentic RAG, query classification)
-- [Agent Architecture](docs/architecture/agent.md) — LangGraph graph topology + state schema
-- [Decisions](docs/decisions/technical_decisions.md) — Architecture decision records (D1–D30)
-- [Patterns](docs/patterns/code_patterns.md) — Code patterns and conventions
-- [Progress](progress.json) — Current implementation status and next steps
+```bash
+bash scripts/start-all.sh --build
+```
+
+This launches 6 containers:
+
+| Container | Purpose | Port |
+|---|---|---|
+| `animind-qdrant` | Vector database | 6333 |
+| `animind-reranker` | Local Qwen3 reranker (GPU) | 8001 |
+| `animind-backend` | FastAPI API server | 8000 (via NGINX) |
+| `animind-frontend` | Next.js chat UI | 3000 (via NGINX) |
+| `animind-nginx` | Reverse proxy | 80 |
+| `animind-dozzle` | Log viewer | 127.0.0.1:9999 |
+
+### 3. Ingest data
+
+```bash
+# Fetch anime data from AniList (rate-limited, checkpoint-safe)
+docker exec animind-backend python scripts/fetch_anilist.py
+
+# Ingest into Qdrant (dense + BM25 dual vectors)
+docker exec animind-backend python scripts/ingest.py
+```
+
+### 4. Use it
+
+- **Chat UI:** http://localhost:80 (or https://chat.vinhkaguya.me if tunnel is configured)
+- **API:** `curl http://localhost:80/health` (via NGINX → backend)
+- **Logs:** http://localhost:9999 (Dozzle)
+
+---
+
+## Scripts Reference
+
+| Script | Purpose |
+|---|---|
+| `scripts/start-all.sh [--build]` | Start all 6 containers |
+| `scripts/stop-all.sh` | Stop all containers |
+| `scripts/start-backend.sh [--build]` | Backend + infra only |
+| `scripts/stop-backend.sh` | Stop backend (infra stays) |
+| `scripts/start-frontend.sh [--build]` | Frontend + infra only |
+| `scripts/stop-frontend.sh` | Stop frontend (infra stays) |
+| `scripts/rebuild.sh [backend\|frontend]` | Force rebuild images (no cache) |
+| `scripts/setup_env.py` | Interactive `.env` setup (API keys, model config) |
+| `scripts/setup_tunnel.sh` | Cloudflare Tunnel one-time setup (install, login, DNS) |
+| `scripts/start.sh` | Alias → `start-all.sh` |
+| `scripts/stop.sh` | Alias → `stop-all.sh` |
+
+---
+
+## Architecture
+
+```
+Internet
+  │
+  ├─ chat.vinhkaguya.me ──┐
+  ├─ api.vinhkaguya.me  ──┤
+  │                        ▼
+  │              Cloudflare Tunnel
+  │              (cloudflared → localhost:80)
+  │                        │
+  │                        ▼
+  │                ┌──────────────┐
+  │                │    NGINX     │ :80
+  │                │  (container) │
+  │                └──────┬───────┘
+  │                       │
+  │          ┌────────────┼────────────┐
+  │          ▼                         ▼
+  │   ┌─────────────┐          ┌────────────┐
+  │   │  Frontend   │ :3000    │  Backend   │ :8000
+  │   │  (Next.js)  │────SSE──▶│  (FastAPI) │
+  │   └─────────────┘          └──────┬─────┘
+  │                                   │
+  │                    ┌──────────────┼──────────────┐
+  │                    ▼              ▼              ▼
+  │             ┌──────────┐   ┌──────────┐   ┌──────────┐
+  │             │  Qdrant  │   │ Reranker │   │  SQLite  │
+  │             │  :6333   │   │  :8001   │   │ (state)  │
+  │             └──────────┘   └──────────┘   └──────────┘
+```
+
+**SSE streaming path:** Browser → `chat.vinhkaguya.me/api/chat/stream` → Next.js proxy route → `backend:8000/chat/stream` → token-by-token response. The Next.js proxy bypasses Cloudflare's response buffering.
+
+---
+
+## Evaluation Results
+
+**Eval run v2** · 50-question test set · GPT-4o-mini as judge · Reference-free (no ground truth)
+
+| Metric | Baseline (retrieve-only) | RAGv1 (full pipeline) | Delta |
+|---|---|---|---|
+| **Faithfulness** (RAGAS) | 0.825 | 0.804 | -0.021 |
+| **Answer Relevancy** (RAGAS) | 0.619 | 0.571 | -0.047 |
+| **FactScore** (custom) | 0.873 | 0.899 | **+0.026** |
+
+> Targets: Faithfulness ≥ 0.80 ✅ · FactScore ≥ 0.75 ✅
+>
+> Full results: [`backend/eval/results/report_v2.md`](backend/eval/results/report_v2.md) · [`scores_v2.json`](backend/eval/results/scores_v2.json)
+
+### Pipeline Comparison
+
+| Setting | Baseline | RAGv1 |
+|---|---|---|
+| Query rewrite | ❌ | ✅ GPT-4o-mini |
+| Metadata filter | ❌ | ✅ Auto-extracted |
+| Retrieval | Top-20 dense | Top-20 hybrid (dense + BM25 RRF) |
+| Reranker | ❌ | ✅ Qwen3-Reranker → top-5 |
+| Self-correction | ❌ | ✅ Relevance gate (0.4 threshold) |
+
+### Category Breakdown — Faithfulness
+
+| Category | Baseline | RAGv1 | Delta |
+|---|---|---|---|
+| edge | 0.567 | 0.677 | **+0.110** |
+| factual | 0.933 | 0.850 | -0.083 |
+| filter | 0.816 | 0.966 | **+0.150** |
+| multi_turn | 0.786 | 0.530 | -0.255 |
+| semantic | 0.812 | 0.836 | +0.024 |
+
+### Category Breakdown — FactScore
+
+| Category | Baseline | RAGv1 | Delta |
+|---|---|---|---|
+| edge | 0.875 | 1.000 | **+0.125** |
+| factual | 0.933 | 0.950 | +0.017 |
+| filter | 0.892 | 0.877 | -0.015 |
+| multi_turn | 0.794 | 0.708 | -0.085 |
+| semantic | 0.811 | 0.889 | **+0.078** |
+
+---
+
+## Key Design Decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| **D1** | AniList over MyAnimeList | 90 req/min, GraphQL, no OAuth for public data |
+| **D2** | Qdrant over Milvus | Simpler single-node, native metadata filtering |
+| **D3** | Local Qwen3 reranker via vLLM | ~2GB VRAM, zero cost, OpenAI-compatible API |
+| **D8** | Hybrid search (dense + BM25) | FActScore audit showed exact-match failures with dense-only |
+| **D14** | ShopAIKey as OpenAI proxy | Cost optimization; swap to direct OpenAI by changing base URL |
+| **D15** | One vector per anime (no chunking) | Anime records are self-contained semantic units (~300-1500 chars) |
+| **D21** | Multi-turn contextualization | Follow-up queries lose context; GPT-4o-mini rewrites them |
+| **D28** | SSE proxy through Next.js | Cloudflare Tunnel buffers responses; Next.js proxy bypasses this |
+| **D32** | Self-correcting retrieval gate | Retry once without filters when reranker confidence < 0.4 |
+
+> Full decision log (33 entries): previously in `docs/decisions/technical_decisions.md`, now archived.
+
+---
+
+## Project Structure
+
+```
+Animind/
+├── backend/
+│   ├── app/
+│   │   ├── agent/          # LangGraph graph, nodes, tools, state
+│   │   ├── api/            # FastAPI routes, schemas, exceptions, middleware
+│   │   ├── rag/            # retriever, reranker client, RAG chain
+│   │   ├── config.py       # pydantic-settings (all env vars)
+│   │   ├── main.py         # FastAPI app + lifespan
+│   │   └── openai_client.py
+│   ├── eval/               # FActScore + RAGAS evaluation pipeline
+│   ├── scripts/            # fetch_anilist.py, ingest.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── frontend/
+│   ├── app/                # Next.js pages + API routes
+│   ├── components/         # ChatWindow, MessageBubble, AnimeCard, Sidebar
+│   ├── lib/                # api.ts, sessions.ts
+│   ├── Dockerfile
+│   └── package.json
+├── nginx/
+│   └── nginx.conf          # Reverse proxy config
+├── scripts/                # start/stop/rebuild + setup_env.py + setup_tunnel.sh
+├── docker-compose.yml      # All 6 services with profiles
+├── AGENTS.md               # AI agent configuration
+└── README.md               # This file
+```
+
+---
+
+## Deployment (Cloudflare Tunnel)
+
+To expose on a custom domain:
+
+1. Install `cloudflared` and create a tunnel
+2. Add DNS records: `CNAME chat → <tunnel-id>.cfargotunnel.com`, `CNAME api → <tunnel-id>.cfargotunnel.com`
+3. Configure `~/.cloudflared/config.yml`:
+   ```yaml
+   ingress:
+     - hostname: chat.vinhkaguya.me
+       service: http://localhost:80
+     - hostname: api.vinhkaguya.me
+       service: http://localhost:80
+     - service: http_status:404
+   ```
+4. Start the tunnel: `cloudflared tunnel run animind`
+
+---
+
+## License
+
+MIT

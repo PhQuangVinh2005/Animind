@@ -18,7 +18,7 @@ import sys
 from getpass import getpass
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent  # project root (one level up from scripts/)
 ENV_FILE = ROOT / "backend" / ".env"
 ENV_EXAMPLE = ROOT / ".env.example"
 
