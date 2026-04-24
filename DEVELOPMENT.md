@@ -15,8 +15,9 @@
 7. [Service Management](#7-service-management)
 8. [Key Design Decisions](#8-key-design-decisions)
 9. [Code Quality](#9-code-quality)
-10. [Smoke Testing](#10-smoke-testing)
-11. [Troubleshooting](#11-troubleshooting)
+10. [Evaluation](#10-evaluation)
+11. [Smoke Testing](#11-smoke-testing)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -33,12 +34,13 @@ Next.js Dev Server (localhost:3000)
     ▼
 FastAPI + LangGraph (localhost:8000)
     ├── Router node      — classifies intent: qa | search | detail
-    ├── RAG node         — extract_filters → rewrite_query → retrieve top-20
-    ├── Rerank node      — Qwen3-Reranker-0.6B → top-5
+    ├── RAG node         — extract_filters → rewrite_query → hybrid retrieve top-20 (dense + BM25 RRF)
+    ├── Rerank node      — Qwen3-Reranker-0.6B → top-5 + top_rerank_score
+    ├── Relevance Gate   — score ≥ 0.4 → synthesize; score < 0.4 → retry without filters (max 1)
     ├── Tool node        — search_anime / get_anime_details (search/detail intents)
     └── Synthesizer node — GPT-4o-mini streams answer token-by-token via SSE
          │
-         ├── Qdrant (localhost:6333)   — vector DB, cosine similarity search
+         ├── Qdrant (localhost:6333)   — vector DB (hybrid: dense + BM25 sparse)
          └── vLLM Reranker (localhost:8001) — local reranker, ~2GB VRAM
 ```
 
@@ -184,15 +186,15 @@ Animind/
 ├── backend/
 │   ├── app/
 │   │   ├── agent/              # LangGraph graph, nodes, state, tools
-│   │   │   ├── graph.py        # Graph definition + compilation
-│   │   │   ├── nodes.py        # router, rag, rerank, tool, synthesizer nodes
-│   │   │   ├── state.py        # AgentState TypedDict
+│   │   │   ├── graph.py        # Graph definition + compilation (incl. relevance gate loop)
+│   │   │   ├── nodes.py        # router, rag, rerank, relevance_gate, tool, synthesizer nodes
+│   │   │   ├── state.py        # AgentState TypedDict (+retry_count, top_rerank_score)
 │   │   │   └── tools.py        # search_anime, get_anime_details
 │   │   ├── api/
 │   │   │   └── routes.py       # POST /chat/stream (SSE), GET /health, /sessions
 │   │   ├── rag/
-│   │   │   ├── chain.py        # Full RAG pipeline (filter→rewrite→retrieve→rerank→generate)
-│   │   │   ├── retriever.py    # Qdrant vector search + metadata filter builder
+│   │   │   ├── chain.py        # Full RAG pipeline (filter→rewrite→retrieve→rerank→generate) + system prompt
+│   │   │   ├── retriever.py    # Qdrant hybrid search (dense + BM25 RRF) + metadata filter builder
 │   │   │   └── reranker.py     # vLLM Qwen3 reranker HTTP client
 │   │   ├── config.py           # Pydantic settings (reads backend/.env)
 │   │   ├── main.py             # FastAPI app + lifespan + CORS + middleware
@@ -202,7 +204,14 @@ Animind/
 │   │   ├── fetch_anilist.py    # AniList GraphQL → data/raw/
 │   │   └── ingest.py           # data/raw/ → embeddings → Qdrant
 │   ├── eval/
-│   │   └── evaluate.py         # RAGAS evaluation pipeline
+│   │   ├── test_set.json           # 50 evaluation questions
+│   │   ├── collect.py              # RAG pipeline runner — saves raw_{pipeline}.json
+│   │   ├── factscore_runner.py     # FActScore algorithm (factscore env, openai<1.0)
+│   │   ├── factscore_eval.py       # Subprocess wrapper: animind → factscore env
+│   │   ├── build_factscore_db.py   # Builds SQLite FTS5 KB from Qdrant
+│   │   ├── evaluate.py             # RAGAS metrics + summary report
+│   │   ├── factscore_db/           # anime_kb.jsonl + anime_kb.db (FTS5 BM25)
+│   │   └── results/                # raw_*.json, factscore_*.json, scores_*.json
 │   └── requirements.txt
 │
 ├── frontend/
@@ -345,15 +354,27 @@ The SSE parser in `lib/api.ts` uses a plain `while (true)` loop over `reader.rea
 
 Messages are stored per-thread in `localStorage` under the key `animind_msgs_<thread_id>`. On thread switch, `loadMessages(threadId)` restores the previous conversation immediately. Messages are saved after `onDone` (via a functional `setMessages` updater to guarantee saving the latest state). Only completed messages (`streaming: false`) are persisted — in-flight streaming messages are never saved.
 
-### Strategy 5 Chunking
+### Strategy 5 Chunking + Hybrid Search
 
-Each anime is stored as a single Qdrant point with a structured text chunk:
+Each anime is stored as a single Qdrant point with **dual named vectors**:
+- **`dense`** — text-embedding-3-small (1536d)
+- **`bm25`** — fastembed sparse vectors
+
+Retrieval uses Qdrant's `query_points()` with two `Prefetch` (one per vector) fused via Reciprocal Rank Fusion (RRF). This provides both semantic understanding and exact keyword matching.
+
+Chunk text format:
 ```
 Title (year, format) | Score: X/10 | Genres: A, B, C
 Tags: x, y, z
 Synopsis...
 ```
-This maximises recall for genre/tag/title queries and makes the full document available for the reranker without multi-chunk merging overhead.
+
+### Self-Correcting Retrieval (Agentic RAG)
+
+After reranking, a **relevance gate** node checks the top reranker score:
+- Score ≥ 0.4 → proceed to synthesizer
+- Score < 0.4 AND first attempt → retry `rag_node` without filters/rewrite for max recall
+- Score < 0.4 AND already retried → proceed with best-effort (future: web search fallback)
 
 ### OpenAI Prefix Caching
 
@@ -407,7 +428,68 @@ bandit -r app/ -ll -q
 
 ---
 
-## 10. Smoke Testing
+## 10. Evaluation
+
+See [backend/eval/README.md](../backend/eval/README.md) for the full evaluation guide. Quick reference:
+
+### Two metrics
+
+| Metric | Tool | Measures | Env |
+|--------|------|---------|-----|
+| **FActScore** | `factscore_runner.py` | Factual precision (atomic fact verification) | `factscore` |
+| **RAGAS** | `evaluate.py` | Faithfulness, answer relevancy, context recall | `animind` |
+
+### Pipeline registry
+
+```python
+# collect.py — PIPELINE_REGISTRY
+"baseline"  → run_baseline   # direct retrieve(top-5) → generate
+"ragv1"     → run_ragv1      # rewrite → filter → retrieve(top-20) → rerank(top-5) → generate
+# "ragv2"  → run_ragv2       ← add future versions here
+```
+
+Output files are namespaced automatically: `raw_{pipeline}.json`, `factscore_{pipeline}_{tag}.json`.
+
+### Full eval run (50 questions)
+
+```bash
+cd backend
+
+# 1. Collect pipeline outputs (~25 min)
+conda run -n animind python eval/collect.py --pipeline all
+
+# 2. FActScore — baseline
+conda run -n factscore python eval/factscore_runner.py \
+  --input eval/results/raw_baseline.json \
+  --output eval/results/factscore_baseline_v1.json \
+  --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0
+
+# 3. FActScore — ragv1
+conda run -n factscore python eval/factscore_runner.py \
+  --input eval/results/raw_ragv1.json \
+  --output eval/results/factscore_ragv1_v1.json \
+  --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0
+
+# 4. RAGAS + final report
+conda run -n animind python eval/evaluate.py --tag v1
+```
+
+### Rebuild knowledge base
+
+```bash
+# Run after Qdrant data changes (adds new anime, re-ingest, etc.)
+conda run -n animind python eval/build_factscore_db.py
+```
+
+### Adding a new RAG version for evaluation
+
+1. Implement `async def run_ragv2(question, oai_client)` in `collect.py`
+2. Add `"ragv2": run_ragv2` to `PIPELINE_REGISTRY`
+3. Run: `conda run -n animind python eval/collect.py --pipeline ragv2`
+
+---
+
+## 11. Smoke Testing
 
 Run these after any significant change to verify the system is working end-to-end.
 
@@ -445,9 +527,20 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000
 # Expected: 200
 ```
 
+### 5. Eval smoke test (5 questions)
+
+```bash
+conda run -n animind python eval/collect.py --pipeline all --limit 5
+conda run -n factscore python eval/factscore_runner.py \
+  --input eval/results/raw_baseline.json \
+  --output eval/results/factscore_baseline_smoke.json \
+  --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0 --limit 5
+# Expected: FActScore logged at end, no SKIP on questions with clear factual answers
+```
+
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### Backend won't start — `[Errno 98] address already in use`
 
@@ -504,4 +597,4 @@ docker compose up -d reranker
 
 ---
 
-*Last verified: 2026-04-23 — all services healthy, SSE streaming confirmed, lint/types clean.*
+*Last verified: 2026-04-24 — hybrid search + self-correcting retrieval live, SSE streaming confirmed, lint/types clean.*

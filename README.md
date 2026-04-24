@@ -1,12 +1,14 @@
 # AniMind — Anime/Manga RAG Chatbot
 
-An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant vector search, Qwen3 reranker, and GPT-4o-mini. Ask natural language questions about anime and get grounded, accurate answers with real-time streaming.
+An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant hybrid search (dense + BM25), Qwen3 reranker, self-correcting retrieval, and GPT-4o-mini. Ask natural language questions about anime and get grounded, accurate answers with real-time streaming.
 
 > **Status:** Local development — not yet exposed publicly. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full developer guide.
 
 ## Features
 
-- **RAG-powered Q&A** — Answers grounded in AniList data via vector search + reranking
+- **RAG-powered Q&A** — Answers grounded in AniList data via hybrid search + reranking
+- **Hybrid Search** — Qdrant native dual-vector (dense + BM25 sparse) with Reciprocal Rank Fusion (RRF)
+- **Self-Correcting Retrieval** — Relevance gate checks reranker score (threshold 0.4); retries without filters on low relevance (max 1 retry)
 - **Strategy 5 Chunking** — Structured single-chunk per anime: Titles → Genres → Tags → Synopsis → Metadata
 - **Metadata Filtering** — Pre-filter by year, genre, score, format before vector search
 - **Reranking** — Qwen3-Reranker-0.6B (local, zero cost) for improved retrieval quality
@@ -16,7 +18,7 @@ An intelligent anime/manga chatbot powered by LangGraph Agent, Qdrant vector sea
 - **Conversation Persistence** — Per-thread message history stored in localStorage; survives page refresh and session switching
 - **Security Headers** — OWASP hardened headers (X-Content-Type-Options, X-Frame-Options, etc.)
 - **Request Tracing** — UUID4 `X-Request-ID` on every request/response for log correlation
-- **Evaluation** — RAGAS metrics for retrieval quality assessment
+- **Evaluation** — FActScore (factual precision) + RAGAS (retrieval quality) with versioned pipeline registry (`baseline`, `ragv1`, …)
 
 ## Quick Start
 
@@ -100,8 +102,9 @@ fetch_anilist.py          → data/raw/anime.json  (39 fields, ~1250 records)
 ingest.py (process_anime)
   ├── clean_html()        → strip HTML, remove (Source: ...) citations
   ├── chunk text          → Titles. Genres. Tags (rank≥70). Synopsis. Metadata.
-  ├── embed               → text-embedding-3-small via ShopAIKey
-  └── upsert              → Qdrant collection "anime"
+  ├── dense embed         → text-embedding-3-small (1536d) via ShopAIKey
+  ├── sparse embed        → fastembed BM25 (Qdrant/bm25)
+  └── upsert              → Qdrant collection "anime" (named vectors: dense + bm25)
                             payload: title, cover, score, genres, tags, full_data
 ```
 
@@ -133,6 +136,11 @@ cd ~/misa/Animind
 docker compose up -d        # start Qdrant + vLLM reranker
 docker compose down         # stop all
 docker compose logs -f      # all logs
+```
+
+### Kill stale Next.js
+```bash
+pkill -f "next"
 ```
 
 ### Verify Health
@@ -189,12 +197,13 @@ Next.js Dev Server (:3000)
     │  POST /chat/stream        ← server-to-server, direct TCP
     ▼
 FastAPI + LangGraph (:8000)
-    ├── Router node    — GPT-4o-mini intent classification
-    ├── RAG node       — extract_filters → rewrite_query → retrieve top-20
-    ├── Rerank node    — Qwen3-Reranker-0.6B → top-5
-    ├── Tool node      — search_anime / get_anime_details
-    └── Synthesizer    — GPT-4o-mini streams answer via SSE
-         ├── Qdrant (:6333)          — vector DB
+    ├── Router node         — GPT-4o-mini intent classification
+    ├── RAG node            — extract_filters → rewrite_query → hybrid retrieve top-20
+    ├── Rerank node         — Qwen3-Reranker-0.6B → top-5 + top_rerank_score
+    ├── Relevance Gate      — score ≥ 0.4 → synthesize; score < 0.4 → retry (max 1)
+    ├── Tool node           — search_anime / get_anime_details
+    └── Synthesizer         — GPT-4o-mini streams answer via SSE
+         ├── Qdrant (:6333)          — vector DB (hybrid: dense + BM25)
          └── vLLM Reranker (:8001)   — local reranker
 ```
 
@@ -223,13 +232,13 @@ backend/app/
 │   ├── schemas.py        # ChatRequest (UUID4 thread_id), ChatResponse, SessionInfo
 │   └── exceptions.py     # Consistent {error, detail, request_id} envelope
 ├── agent/
-│   ├── state.py          # AgentState (TypedDict)
-│   ├── nodes.py          # make_nodes() — router, rag, reranker, tool, synthesizer
+│   ├── state.py          # AgentState (TypedDict) — +retry_count, top_rerank_score
+│   ├── nodes.py          # make_nodes() — router, rag, reranker, relevance_gate, tool, synthesizer
 │   ├── tools.py          # search_anime(), get_anime_details()
 │   └── graph.py          # build_graph() — LangGraph StateGraph
 └── rag/
-    ├── chain.py           # Full RAG pipeline
-    ├── retriever.py       # retrieve() — Qdrant similarity search
+    ├── chain.py           # Full RAG pipeline + system prompt
+    ├── retriever.py       # retrieve() — Qdrant hybrid search (dense + BM25 RRF)
     └── reranker.py        # rerank() — vLLM /v1/rerank
 ```
 
@@ -246,7 +255,7 @@ backend/app/
 | Backend | FastAPI + SSE (sse-starlette) |
 | Frontend | Next.js 14 (self-hosted, `next start` on homeserver) |
 | Tunnel | Cloudflare Tunnel — `chat.vinhkaguya.me` (:3000) + `api.vinhkaguya.me` (:8000) |
-| Evaluation | RAGAS |
+| Evaluation | FActScore (factual precision) + RAGAS (retrieval quality) |
 | Data Source | AniList GraphQL API |
 
 ## Environment Variables
@@ -293,7 +302,8 @@ journalctl -u animind-backend -u cloudflared-animind -f
 ## Documentation
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — Developer guide: setup, workflow, design decisions, smoke tests, troubleshooting
-- [Plan](plan_v2.md) — Detailed 7-day implementation plan
+- [FActScore Eval Guide](backend/eval/README.md) — Evaluation pipeline: FActScore + RAGAS, pipeline registry, CLI reference
+- [Plan v3](plan_v3.md) — RAG improvement roadmap (hybrid search, agentic RAG, query classification)
 - [Agent Architecture](docs/architecture/agent.md) — LangGraph graph topology + state schema
 - [Decisions](docs/decisions/technical_decisions.md) — Architecture decision records (D1–D30)
 - [Patterns](docs/patterns/code_patterns.md) — Code patterns and conventions

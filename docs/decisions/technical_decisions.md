@@ -35,10 +35,12 @@
 - **Reason:** 30x cheaper, sufficient quality for testing
 - **Trade-off:** Slightly lower quality responses during dev
 
-## D8: Cut Hybrid Search
-- **Decision:** Remove hybrid search (dense + BM25), keep only dense + reranker
-- **Reason:** Reranker compensates for retrieval quality, simplifies pipeline
-- **Trade-off:** May miss exact keyword matches, but reranker mitigates this
+## D8: Hybrid Search Reinstated (Dense + BM25)
+- **Decision:** Reinstate hybrid search using Qdrant native dual-vector (dense + BM25 sparse) with RRF fusion
+- **Previous:** Cut hybrid search in v1, kept only dense + reranker
+- **Reason:** FActScore audit revealed exact-match failures (e.g. "score of Clannad: After Story" returning wrong title). BM25 sparse vectors capture exact keyword matches that dense embeddings miss.
+- **Implementation:** `fastembed` generates BM25 sparse vectors at ingest time. Retrieval uses `query_points()` with two `Prefetch` (one per named vector) fused via `FusionQuery(RRF)`.
+- **Trade-off:** Requires re-ingestion with `--reset`. ~10% slower retrieval due to dual prefetch, negligible at 1250 docs.
 
 ## D9: SSE > WebSocket
 - **Decision:** Server-Sent Events for streaming responses
@@ -250,3 +252,23 @@
   - `reader.cancel()` in `finally` ensures the ReadableStream is always released.
 - **Trade-off:** Slightly more imperative code vs. the elegant generator pattern. Worth it for reliability and debuggability.
 
+## D31: Qdrant Native Hybrid Search over External BM25
+- **Decision:** Use Qdrant's built-in sparse vector support for BM25 rather than an external index (rank_bm25, SQLite FTS5)
+- **Reason:** Atomic retrieval — single `query_points()` call returns fused results. No need for external BM25 index, merge logic, or additional services. Qdrant handles both vector types and RRF fusion server-side.
+- **Alternative considered:** Reuse FActScore's SQLite FTS5 KB for BM25. Rejected because it would require maintaining two search backends and complex score normalization.
+- **Implementation:** Named vectors `dense` (text-embedding-3-small, 1536d) and `bm25` (fastembed sparse). Collection created with `VectorParams` + `SparseVectorParams`.
+- **Trade-off:** fastembed dependency added (~200MB). BM25 quality slightly lower than tuned FTS5, but sufficient for retrieval with reranker downstream.
+
+## D32: Self-Correcting Retrieval (Relevance Gate)
+- **Decision:** Add a `relevance_gate_node` after reranking that checks the top reranker score and retries retrieval once if below threshold (0.4)
+- **Reason:** FActScore audit showed several questions getting irrelevant retrievals due to overly restrictive metadata filters or poor query rewrites. A single retry without filters recovers most of these cases.
+- **State machine:** Uses `retry_count` (0 → 1 → 2) to track loop progress. Router function checks `retry_count` to decide between rag (retry) and synthesizer (proceed).
+- **Retry strategy:** On retry, `rag_node` skips `extract_filters()` and `rewrite_query()` — uses the original contextualized query with no filters for maximum recall.
+- **Future:** Web search fallback when retry also fails (retry_count == 2 AND score < 0.4).
+- **Trade-off:** Worst case adds ~3s latency (extra retrieve + rerank cycle). Only triggers when retrieval quality is genuinely poor.
+
+## D33: Strict Markdown Response Format
+- **Decision:** Strengthen system prompt format rules with explicit bullet template and multi-title few-shot example
+- **Reason:** GPT-4o-mini was cramming 5+ anime into a single paragraph when the format instructions were vague ("bullet points or short paragraphs"). Users complained about wall-of-text responses.
+- **Implementation:** Added `RESPONSE FORMAT (STRICT — follow exactly)` section with template `- **Title** [N] — Year, Format. Description. Score: X.X/10.` and explicit "NEVER write multiple titles in the same paragraph" rule. Added a 4-anime romance few-shot example.
+- **Trade-off:** Slightly more rigid responses, but dramatically better readability.

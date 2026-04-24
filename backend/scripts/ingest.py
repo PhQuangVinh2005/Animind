@@ -26,10 +26,13 @@ from pathlib import Path
 
 from loguru import logger
 from openai import AsyncOpenAI
+from fastembed import SparseTextEmbedding
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
     PointStruct,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
@@ -354,7 +357,14 @@ async def embed_texts(
 # ── Qdrant setup ──────────────────────────────────────────────────────────────
 
 async def ensure_collection(qdrant: AsyncQdrantClient) -> None:
-    """Create the Qdrant collection if it doesn't already exist."""
+    """Create the Qdrant collection with named dense + sparse vectors.
+
+    Vector layout:
+        "dense" — text-embedding-3-small (1536-dim, cosine)
+        "bm25"  — fastembed Qdrant/bm25 sparse vectors (keyword matching)
+
+    Hybrid search uses Qdrant's prefetch + RRF fusion at query time.
+    """
     existing = {c.name for c in (await qdrant.get_collections()).collections}
 
     if settings.qdrant_collection in existing:
@@ -366,10 +376,15 @@ async def ensure_collection(qdrant: AsyncQdrantClient) -> None:
 
     await qdrant.create_collection(
         collection_name=settings.qdrant_collection,
-        vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+        vectors_config={
+            "dense": VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+        },
+        sparse_vectors_config={
+            "bm25": SparseVectorParams(),
+        },
     )
     logger.info(
-        "Created Qdrant collection '{col}' (dim={dim}, cosine).",
+        "Created Qdrant collection '{col}' (dense={dim}d cosine + bm25 sparse).",
         col=settings.qdrant_collection,
         dim=EMBEDDING_DIM,
     )
@@ -476,34 +491,48 @@ async def ingest(limit: int | None = None, reset: bool = False) -> None:
 
     await ensure_collection(qdrant)
 
-    # 4. Embed in batches
+    # 4. Dense embeddings (text-embedding-3-small via ShopAIKey)
     logger.info(
-        "Embedding {n} documents with {model} …",
+        "Embedding {n} documents with {model} (dense) …",
         n=len(texts),
         model=settings.openai_embedding_model,
     )
-    vectors = await embed_texts(openai_client, texts)
-    logger.success("Embedding complete — {n} vectors generated.", n=len(vectors))
+    dense_vectors = await embed_texts(openai_client, texts)
+    logger.success("Dense embedding complete — {n} vectors.", n=len(dense_vectors))
 
-    # 5. Upsert to Qdrant in batches
+    # 5. Sparse embeddings (BM25 via fastembed — CPU only, no GPU needed)
+    logger.info("Generating BM25 sparse vectors with fastembed …")
+    sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+    sparse_embeddings = list(sparse_model.embed(texts))
+    logger.success("BM25 sparse embedding complete — {n} vectors.", n=len(sparse_embeddings))
+
+    # 6. Upsert to Qdrant with named vectors (dense + bm25)
     logger.info(
-        "Upserting {n} points to collection '{col}' …",
+        "Upserting {n} points to collection '{col}' (hybrid: dense + bm25) …",
         n=len(records),
         col=settings.qdrant_collection,
     )
 
     for i in range(0, len(records), UPSERT_BATCH_SIZE):
         batch_records  = records [i : i + UPSERT_BATCH_SIZE]
-        batch_vectors  = vectors [i : i + UPSERT_BATCH_SIZE]
+        batch_dense    = dense_vectors [i : i + UPSERT_BATCH_SIZE]
+        batch_sparse   = sparse_embeddings[i : i + UPSERT_BATCH_SIZE]
         batch_payloads = payloads[i : i + UPSERT_BATCH_SIZE]
 
         points = [
             PointStruct(
                 id=record["id"],          # AniList ID as Qdrant point ID (uint64)
-                vector=vector,
+                vector={
+                    "dense": dense_vec,
+                    "bm25": SparseVector(
+                        indices=sparse_emb.indices.tolist(),
+                        values=sparse_emb.values.tolist(),
+                    ),
+                },
                 payload=payload,
             )
-            for record, vector, payload in zip(batch_records, batch_vectors, batch_payloads)
+            for record, dense_vec, sparse_emb, payload
+            in zip(batch_records, batch_dense, batch_sparse, batch_payloads)
         ]
 
         await qdrant.upsert(

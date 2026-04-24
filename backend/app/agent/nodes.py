@@ -341,8 +341,14 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
 
     # ── rag_node ──────────────────────────────────────────────────────────────
     async def rag_node(state: AgentState) -> dict:
-        """[qa path] Contextualize → auto-filter → retrieve top-20 from Qdrant."""
+        """[qa path] Contextualize → auto-filter → retrieve top-20 from Qdrant.
+
+        On retry (retry_count > 0): skips filter extraction and query rewrite
+        to maximise recall with the original contextualized query.
+        """
         query = _last_user_text(state)
+        retry_count: int = state.get("retry_count", 0)  # type: ignore[call-overload]
+        is_retry = retry_count > 0
 
         # Step 0: Contextualize follow-up questions using conversation history
         # e.g. "what about its score?" + history → "Vinland Saga score"
@@ -350,12 +356,20 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
             query, state["messages"], oai_client
         )
 
-        # Auto-extract metadata filters from the contextualized query
-        extracted = await extract_filters(contextualized, oai_client)
-        filter_kwargs = extracted.to_dict() if not extracted.is_empty() else None
-
-        # Rewrite the contextualized query for retrieval
-        rewritten = await rewrite_query(contextualized, oai_client)
+        if is_retry:
+            # Retry strategy: drop filters, use original query for max recall
+            filter_kwargs = None
+            rewritten = contextualized  # skip rewrite — preserve original signal
+            logger.info(
+                "rag_node: RETRY #{n} — no filters, no rewrite, query={q!r}",
+                n=retry_count,
+                q=contextualized[:60],
+            )
+        else:
+            # Normal first attempt
+            extracted = await extract_filters(contextualized, oai_client)
+            filter_kwargs = extracted.to_dict() if not extracted.is_empty() else None
+            rewritten = await rewrite_query(contextualized, oai_client)
 
         # Retrieve top-20
         candidates = await retrieve(
@@ -367,11 +381,11 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
 
         serialised = [doc_to_dict(d) for d in candidates]
         logger.debug(
-            "rag_node: query={q!r} → contextualized={c!r} → rewritten={r!r} | {n} docs",
+            "rag_node: query={q!r} → rewritten={r!r} | {n} docs (retry={retry})",
             q=query[:50],
-            c=contextualized[:50],
             r=rewritten[:50],
             n=len(serialised),
+            retry=is_retry,
         )
         return {
             "retrieval_query": rewritten,
@@ -384,21 +398,22 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
         docs_dicts: list[dict] = state.get("retrieved_docs", [])  # type: ignore[assignment]
         if not docs_dicts:
             logger.warning("rerank_node: no retrieved_docs in state, skipping.")
-            return {"reranked_docs": []}
+            return {"reranked_docs": [], "top_rerank_score": 0.0}
 
         query = state.get("retrieval_query") or _last_user_text(state)  # type: ignore[call-overload]
         doc_texts = [d["chunk_text"] for d in docs_dicts]
 
         ranked = await rerank(query, doc_texts, top_k=settings.reranker_top_k)
         reranked = [docs_dicts[r["index"]] for r in ranked]
+        top_score = ranked[0]["relevance_score"] if ranked else 0.0
 
         logger.debug(
             "rerank_node: {total} → top-{k}, best={s:.3f}",
             total=len(docs_dicts),
             k=len(reranked),
-            s=ranked[0]["relevance_score"] if ranked else 0,
+            s=top_score,
         )
-        return {"reranked_docs": reranked}
+        return {"reranked_docs": reranked, "top_rerank_score": top_score}
 
     # ── tool_node ─────────────────────────────────────────────────────────────
     async def tool_node(state: AgentState) -> dict:
@@ -502,10 +517,69 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
             "final_answer": answer,
         }
 
+    # ── relevance_gate_node ────────────────────────────────────────────────────
+    # Relevance threshold for self-correcting retrieval.
+    # If the best reranker score is below this, retry once without filters.
+    _RELEVANCE_THRESHOLD = 0.4
+
+    async def relevance_gate_node(state: AgentState) -> dict:
+        """[qa path] Check retrieval quality; retry once if docs are irrelevant.
+
+        State machine (retry_count):
+            0 → score >= 0.4 → PASS (return {})
+            0 → score <  0.4 → RETRY (return {retry_count: 1})
+            1 → score >= 0.4 → PASS (return {retry_count: 2})
+            1 → score <  0.4 → PASS exhausted (return {retry_count: 2})
+                  (Future: web search fallback when retry also fails.)
+
+        The router reads retry_count to decide:
+            retry_count == 1 → route to "rag" (do the retry)
+            retry_count >= 2 → route to "synthesizer" (done)
+        """
+        top_score: float = state.get("top_rerank_score", 0.0)  # type: ignore[call-overload]
+        retry_count: int = state.get("retry_count", 0)  # type: ignore[call-overload]
+
+        # ── First pass (retry_count == 0) ─────────────────────────────────
+        if retry_count == 0:
+            if top_score >= _RELEVANCE_THRESHOLD:
+                logger.info(
+                    "relevance_gate: PASS — score={s:.3f} (threshold={t})",
+                    s=top_score,
+                    t=_RELEVANCE_THRESHOLD,
+                )
+                return {}  # proceed to synthesizer
+            else:
+                logger.info(
+                    "relevance_gate: RETRY — score={s:.3f} < threshold={t}, "
+                    "retrying without filters.",
+                    s=top_score,
+                    t=_RELEVANCE_THRESHOLD,
+                )
+                return {"retry_count": 1}  # router sends to rag
+
+        # ── Second pass (retry_count >= 1) — always proceed ──────────────
+        if top_score < _RELEVANCE_THRESHOLD:
+            logger.warning(
+                "relevance_gate: PASS (retry exhausted) "
+                "score={s:.3f} < threshold={t} — answer may be low quality."
+                # TODO: web search fallback here in future implementation
+                ,
+                s=top_score,
+                t=_RELEVANCE_THRESHOLD,
+            )
+        else:
+            logger.info(
+                "relevance_gate: PASS (retry succeeded) — score={s:.3f} (threshold={t})",
+                s=top_score,
+                t=_RELEVANCE_THRESHOLD,
+            )
+        return {"retry_count": 2}  # signal router: done, go to synthesizer
+
     return {
-        "router":      router_node,
-        "rag":         rag_node,
-        "reranker":    rerank_node,
-        "tool":        tool_node,
-        "synthesizer": synthesizer_node,
+        "router":         router_node,
+        "rag":            rag_node,
+        "reranker":       rerank_node,
+        "relevance_gate": relevance_gate_node,
+        "tool":           tool_node,
+        "synthesizer":    synthesizer_node,
     }

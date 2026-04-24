@@ -1,13 +1,14 @@
 # 🎌 AniMind v2 — Kế hoạch Chi tiết (7 ngày)
 
 > **Trạng thái hiện tại (2026-04-23):**
-> - ✅ **Ngày 1–5 hoàn thành** — Hạ tầng, RAG pipeline, LangGraph agent, FastAPI + SSE, Frontend
+> - ✅ **Ngày 1–7 hoàn thành** — Hạ tầng, RAG pipeline, LangGraph agent, FastAPI + SSE, Frontend, Evaluation, Documentation
 > - ✅ **Streaming hoạt động** — Token-by-token qua Next.js SSE proxy (bypass Cloudflare buffering)
 > - ✅ **Markdown rendering** — `react-markdown` + `remark-gfm` + Tailwind Typography
 > - ✅ **Conversation persistence** — Per-thread message history trong `localStorage`
+> - ✅ **Evaluation pipeline** — FActScore (factual precision) + RAGAS (retrieval quality), PIPELINE_REGISTRY (baseline / ragv1)
 > - ✅ **Code quality clean** — ESLint, TSC, Ruff, MyPy, Bandit tất cả pass
-> - 🎯 **Ưu tiên tiếp theo** — Cải thiện RAG pipeline (chunking, retrieval, reranking quality)
-> - ⏳ **Chưa làm** — RAGAS evaluation (Ngày 6), public deployment qua Cloudflare Tunnel
+> - ✅ **Documentation** — README.md, DEVELOPMENT.md, backend/eval/README.md, AGENTS.md đã cập nhật
+> - 🎯 **Ưu tiên tiếp theo** — Chạy full 50-question eval → phân tích kết quả → thiết kế ragv2
 
 ## Thay đổi so với v1
 
@@ -263,75 +264,136 @@ ingress:
 
 ---
 
-### Ngày 6 — Retrieval Evaluation (RAGAS) + Polish (8h)
+### Ngày 6 — Retrieval Evaluation: FActScore + RAGAS ✅
+
+> **Chiến lược (Strategy A):** Không cần ground-truth label. Chỉ dùng
+> question + retrieved context + generated answer để đánh giá. Hai pipeline:
+> **baseline** (no reranker, no query rewrite) vs **ragv1** (full pipeline).
+> FActScore chạy trong isolated `factscore` conda env (openai<1.0).
+> RAGAS chạy trong `animind` env.
 
 | Giờ | Công việc | Chi tiết |
 |---|---|---|
-| 1-2 | Tạo test set | 50 câu hỏi + ground truth answers (manual + LLM-assisted) |
-| 2-4 | RAGAS evaluation | Context Precision, Context Recall, Faithfulness, Answer Relevancy |
-| 4-5 | So sánh | Eval có reranker vs không reranker → chứng minh reranker cải thiện |
-| 5-6 | Ablation | Eval có query rewrite vs không → đo impact |
-| 6-8 | Bug fixes + UI polish | Fix issues từ end-to-end testing |
+| 1-2 | Tạo test set | 50 câu hỏi (English only), 5 categories, không cần ground truth |
+| 2-4 | RAGAS evaluation | `faithfulness` + `answer_relevancy` (reference-free) |
+| 4-6 | FactScore evaluation | Atomic claim decomposition → verify each claim vs context (LLM-as-judge) |
+| 6-7 | So sánh pipeline | Baseline (no reranker, no rewrite) vs Current (full pipeline) |
+| 7-8 | Kết quả + báo cáo | Save JSON + Markdown report, identify weakest areas |
 
-**RAGAS Metrics:**
+**Evaluation Strategy — Reference-Free (Strategy A):**
 
-| Metric | Đo gì | Target |
-|---|---|---|
-| **Context Precision** | Retrieved docs có relevant không? | ≥ 0.7 |
-| **Context Recall** | Có thiếu thông tin quan trọng không? | ≥ 0.7 |
-| **Faithfulness** | Answer có bịa thông tin không? | ≥ 0.8 |
-| **Answer Relevancy** | Answer có trả lời đúng câu hỏi không? | ≥ 0.8 |
+Không cần external dataset hay ground truth labels. Mỗi sample chỉ gồm:
+```
+{
+  "question": "...",              ← do người dùng viết
+  "answer": "...",                ← do pipeline generate
+  "contexts": ["...", "..."]      ← retrieved + reranked docs
+}
+```
 
-**Evaluation script snippet:**
+**Metrics (tất cả reference-free):**
+
+| Metric | Tool | Đo gì | Cần GT? | Target |
+|---|---|---|---|---|
+| **Faithfulness** | RAGAS | Mọi claim trong answer có trong context không? | ❌ No | ≥ 0.8 |
+| **Answer Relevancy** | RAGAS | Answer có trả lời đúng câu hỏi không? | ❌ No | ≥ 0.8 |
+| **FactScore** | Custom LLM-judge | Atomic fact-level grounding: từng sự kiện riêng lẻ có trong context không? | ❌ No | ≥ 0.75 |
+
+**FactScore flow:**
+```
+answer
+  → GPT-4o-mini: "Decompose into atomic facts (list)"
+  → [fact_1, fact_2, ..., fact_N]
+  → for each fact:
+       GPT-4o-mini: "Is this fact supported by the context below? yes/no"
+  → FactScore = supported_facts / total_facts
+```
+
+**Two pipeline modes (PIPELINE_REGISTRY trong collect.py):**
 ```python
-from ragas import evaluate
-from ragas.metrics import (
-    context_precision, context_recall,
-    faithfulness, answer_relevancy
-)
+PIPELINE_REGISTRY = {
+    "baseline": run_baseline,  # retrieve(top-5) → GPT generate
+    "ragv1":    run_ragv1,     # rewrite → filter → retrieve(top-20) → rerank(top-5) → GPT generate
+    # "ragv2": run_ragv2,     ← thêm future versions tại đây
+}
+```
 
-# So sánh: với reranker vs không reranker
-results_with_reranker = evaluate(
-    dataset=test_dataset,
-    metrics=[context_precision, context_recall,
-             faithfulness, answer_relevancy],
-)
-results_without_reranker = evaluate(...)
+**Test set structure (30 câu hỏi, không cần ground truth):**
 
-# Output comparison table
+| Category | Số câu | Ví dụ |
+|---|---|---|
+| factual | 15 | "How many episodes does FMA Brotherhood have?" |
+| semantic | 13 | "What anime explores themes of loss and redemption?" |
+| filter | 10 | "What action anime from 2019 have a high score?" |
+| multi_turn | 8 | "Explain the Nen system in Hunter x Hunter (2011)" |
+| edge | 4 | Single word "anime", contradictory/vague queries |
+
+**Evaluation script architecture:**
+```
+eval/
+├── test_set.json              # 50 questions (English, no ground truth) ✅
+├── collect.py                 # PIPELINE_REGISTRY: baseline + ragv1 ✅
+├── factscore_runner.py        # FActScore algorithm — chạy trong factscore env ✅
+├── factscore_eval.py          # Subprocess wrapper: animind → factscore env ✅
+├── build_factscore_db.py      # SQLite FTS5 KB builder từ Qdrant ✅
+├── evaluate.py                # RAGAS faithfulness + answer_relevancy ✅
+├── factscore_db/
+│   ├── anime_kb.jsonl         # JSONL knowledge source (18650+ entries)
+│   └── anime_kb.db            # SQLite FTS5 BM25 KB ✅
+└── results/
+    ├── raw_baseline.json      # {question, answer, retrieved_docs} × N
+    ├── raw_ragv1.json         # same cho ragv1
+    ├── factscore_baseline_v1.json
+    └── factscore_ragv1_v1.json
+```
+
+**Run commands:**
+```bash
+cd /home/kaguya/misa/Animind/backend
+
+# Smoke test (5 questions)
+conda run -n animind python eval/collect.py --pipeline all --limit 5
+conda run -n factscore python eval/factscore_runner.py \
+  --input eval/results/raw_baseline.json \
+  --output eval/results/factscore_baseline_smoke.json \
+  --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0 --limit 5
+
+# Full eval (50 questions)
+conda run -n animind python eval/collect.py --pipeline all
+conda run -n factscore python eval/factscore_runner.py \
+  --input eval/results/raw_baseline.json \
+  --output eval/results/factscore_baseline_v1.json \
+  --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0
+conda run -n factscore python eval/factscore_runner.py \
+  --input eval/results/raw_ragv1.json \
+  --output eval/results/factscore_ragv1_v1.json \
+  --db eval/factscore_db/anime_kb.db --judge-model gpt-4o-mini --gamma 0
+conda run -n animind python eval/evaluate.py --tag v1
 ```
 
 **Deliverables:**
-- `eval/test_set.json` — 50 QA pairs
-- `eval/evaluate.py` — RAGAS evaluation script
-- `eval/results/` — comparison tables + charts
-- Báo cáo: reranker impact, query rewrite impact
+- `eval/test_set.json` — 50 questions (reference-free, English) ✅
+- `eval/collect.py` — PIPELINE_REGISTRY: baseline + ragv1, incremental save ✅
+- `eval/factscore_runner.py` — full FActScore algorithm (factscore env) ✅
+- `eval/build_factscore_db.py` — SQLite FTS5 KB builder ✅
+- `eval/factscore_eval.py` — subprocess wrapper for env isolation ✅
+- `eval/evaluate.py` — RAGAS orchestrator + Markdown report ✅
+- `eval/factscore_db/anime_kb.db` — BM25 KB built and verified ✅
+- `backend/eval/README.md` — full evaluation guide ✅
+- Ruff + Bandit + MyPy all passing on eval/ ✅
 
 ---
 
-### Ngày 6 — RAGAS Evaluation *(chưa làm)*
-
-> Sẽ thực hiện sau khi RAG pipeline được cải thiện.
-
-| Giờ | Công việc | Chi tiết |
-|---|---|---|
-| 1-2 | Tạo test set | 50 câu hỏi + ground truth answers |
-| 2-4 | RAGAS evaluation | Context Precision, Recall, Faithfulness, Answer Relevancy |
-| 4-5 | So sánh | Có reranker vs không reranker |
-| 5-6 | Ablation | Có query rewrite vs không |
-| 6-8 | Bug fixes + UI polish | Fix issues từ end-to-end testing |
-
----
 
 ### Ngày 7 — Documentation + Deployment *(một phần hoàn thành)*
 
 | Giờ | Công việc | Chi tiết | Trạng thái |
 |---|---|---|---|
 | 1-3 | End-to-end testing | 20 câu hỏi, edge cases, multi-turn | ✅ Done (local) |
-| 3-4 | Documentation | README, DEVELOPMENT.md, docs/ cập nhật | ✅ Done |
+| 3-4 | Documentation | README.md, DEVELOPMENT.md, backend/eval/README.md, AGENTS.md | ✅ Done |
 | 4-6 | Code quality | ESLint, TSC, Ruff, MyPy, Bandit | ✅ All pass |
 | 6-7 | Demo script | 6 câu hỏi showcase | ⏳ Pending |
-| 7-8 | Public deployment | Cloudflare Tunnel expose | ⏳ Sau RAG improvement |
+| 7-8 | Public deployment | Cloudflare Tunnel expose chat.vinhkaguya.me | ⏳ Sau eval + ragv2 |
 
 **Docker Compose cuối cùng:**
 ```yaml
@@ -409,9 +471,14 @@ animind/
 │   │   ├── fetch_anilist.py     # AniList GraphQL fetcher
 │   │   └── ingest.py            # Chunk + embed + upsert
 │   ├── eval/
-│   │   ├── test_set.json        # 50 QA pairs with ground truth
-│   │   ├── evaluate.py          # RAGAS evaluation
-│   │   └── results/             # Metrics, charts
+│   │   ├── test_set.json           # 50 questions (reference-free)
+│   │   ├── collect.py              # PIPELINE_REGISTRY: baseline + ragv1
+│   │   ├── factscore_runner.py     # FActScore (factscore env, openai<1.0)
+│   │   ├── factscore_eval.py       # Subprocess wrapper: animind → factscore
+│   │   ├── build_factscore_db.py   # SQLite FTS5 KB builder
+│   │   ├── evaluate.py             # RAGAS orchestrator
+│   │   ├── factscore_db/           # anime_kb.jsonl + anime_kb.db
+│   │   └── results/                # raw_*.json, factscore_*.json
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/
@@ -489,18 +556,32 @@ animind/
 
 ---
 
-## 🎯 Việc tiếp theo (RAG Pipeline Improvement)
+## 🎯 Việc tiếp theo (RAG Pipeline Improvement — ragv2)
 
-> Deployment lên public sẽ thực hiện sau khi RAG pipeline đạt chất lượng tốt.
+> Chạy full 50-question eval trước để có baseline scores, sau đó implement ragv2.
+
+### Thêm ragv2 vào PIPELINE_REGISTRY
+
+```python
+# 1. Implement trong collect.py
+async def run_ragv2(question: str, oai_client) -> RAGResult:
+    ...  # new strategy
+
+# 2. Register
+PIPELINE_REGISTRY["ragv2"] = run_ragv2
+
+# 3. Run
+conda run -n animind python eval/collect.py --pipeline ragv2
+```
 
 ### Các hướng cải thiện RAG
 
 | Hạng mục | Mô tả | Ưu tiên |
 |---|---|---|
+| **Filter accuracy** | Cải thiện `extract_filters()` với few-shot tốt hơn | P0 |
+| **RAGAS baseline** | Chạy full 50-question eval để có baseline | P0 |
 | **Chunking strategy** | Thử multi-chunk (synopsis riêng, metadata riêng) | P1 |
+| **Retrieval top-k** | Tăng top-20 → top-50, đo impact lên FActScore | P1 |
 | **Hybrid search** | BM25 + dense vector (dù đã cắt, có thể thử lại) | P2 |
-| **Retrieval top-k** | Tăng top-20 → top-50, đo impact lên RAGAS | P1 |
 | **Reranker tuning** | Thử `max-model-len` lớn hơn cho context dài | P2 |
-| **Filter accuracy** | Cải thiện `extract_filters()` với few-shot tốt hơn | P1 |
-| **RAGAS baseline** | Chạy eval trước khi improve để có baseline | P0 |
 | **Query rewrite** | Cải thiện few-shot examples | P2 |

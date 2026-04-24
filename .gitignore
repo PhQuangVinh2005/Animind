@@ -67,3 +67,5 @@ backend/eval/results/
 
 # ── Media / large assets in root ─────────────────────────────────────────────
 kaguya-wpp.jpg
+
+backend/eval/factscore_db/*

@@ -15,11 +15,15 @@ three intent-specific pipelines, backed by Qdrant vector search and a Qwen3 rera
    ▼
 router_node                  ← GPT-4o-mini intent classification
    │
-   ├── "qa"     ──► rag_node ──► rerank_node ──► synthesizer_node ──► [END]
+   ├── "qa"     ─► rag_node ─► rerank_node ─► relevance_gate_node
+   │                  ↑                            │
+   │                  └─ (retry, max 1) ──────────┤
+   │                                               ▼
+   │                                          synthesizer_node ─► [END]
    │
-   ├── "search" ──► tool_node ─────────────────► synthesizer_node ──► [END]
+   ├── "search" ─► tool_node ────────────────► synthesizer_node ─► [END]
    │
-   └── "detail" ──► tool_node ─────────────────► synthesizer_node ──► [END]
+   └── "detail" ─► tool_node ────────────────► synthesizer_node ─► [END]
 ```
 
 ---
@@ -49,15 +53,28 @@ Full pipeline sub-step sequence:
 1. **Contextualize** — `_contextualize_query()`: GPT-4o-mini rewrites follow-up questions
    into self-contained queries using the last 4 conversation turn-pairs. Skipped on first turn.
 2. **Filter extraction** — `extract_filters()` from `chain.py`: GPT-4o-mini parses
-   year/genre/format/score from the contextualized query.
-3. **Query rewrite** — `rewrite_query()` from `chain.py`: few-shot expansion of vague terms.
-4. **Retrieve top-20** — `retrieve()` from `retriever.py`: text-embedding-3-small + Qdrant vector search.
+   year/genre/format/score from the contextualized query. *Skipped on retry.*
+3. **Query rewrite** — `rewrite_query()` from `chain.py`: few-shot expansion of vague terms. *Skipped on retry.*
+4. **Retrieve top-20** — `retrieve()` from `retriever.py`: **hybrid search** (dense text-embedding-3-small + BM25 sparse) with Reciprocal Rank Fusion via Qdrant `query_points()`.
+- **On retry (`retry_count > 0`):** Steps 2–3 are skipped — uses the original contextualized query with no filters for maximum recall.
 - **Writes to state:** `retrieval_query`, `retrieved_docs` (serialised list of dicts)
 
 ### `rerank_node` *(qa path only)*
 - **Input:** `state["retrieved_docs"]` (20 docs), `state["retrieval_query"]`
 - **Calls:** `rerank()` → POST to vLLM `/v1/rerank` (Qwen3-Reranker-0.6B)
-- **Writes to state:** `reranked_docs` (top-5 dicts)
+- **Writes to state:** `reranked_docs` (top-5 dicts), `top_rerank_score` (best relevance score)
+
+### `relevance_gate_node` *(qa path only)*
+Checks retrieval quality before synthesis. State machine:
+```
+retry_count: 0 → score ≥ 0.4 → PASS → synthesizer
+retry_count: 0 → score <  0.4 → RETRY → {retry_count: 1} → rag_node
+retry_count: 1 → score ≥ 0.4 → PASS → {retry_count: 2} → synthesizer
+retry_count: 1 → score <  0.4 → PASS (exhausted) → {retry_count: 2} → synthesizer
+```
+- **Threshold:** 0.4 (configurable in both `nodes.py` and `graph.py`)
+- **Future:** Web search fallback when retry also fails
+- **Writes to state:** `retry_count`
 
 ### `tool_node` *(search / detail paths)*
 Dispatches based on `state["intent"]`:
@@ -96,6 +113,8 @@ class AgentState(TypedDict):
     retrieval_query: str                     # rewritten query used for retrieve + rerank
     retrieved_docs: list[dict]               # top-20 from rag_node (serialised)
     reranked_docs: list[dict]                # top-5 from rerank_node (serialised)
+    top_rerank_score: float                  # best relevance_score from reranker (gate signal)
+    retry_count: int                         # 0 = first attempt, 1 = retried, 2 = done
     tool_output: dict                        # {"type": "...", "data": {...}}
     final_answer: str                        # final answer string
 ```
@@ -129,10 +148,11 @@ Each dict in `retrieved_docs` / `reranked_docs`:
 ```
 Last user message
     → _contextualize_query(history[-4 pairs])   # resolve implicit references
-    → extract_filters(contextualized)            # parse metadata
-    → rewrite_query(contextualized)              # expand for retrieval
-    → retrieve(rewritten, top_k=20)              # Qdrant vector search
-    → rerank(top_k=5)                            # Qwen3-Reranker
+    → extract_filters(contextualized)            # parse metadata (skipped on retry)
+    → rewrite_query(contextualized)              # expand for retrieval (skipped on retry)
+    → retrieve(rewritten, top_k=20)              # Qdrant hybrid search (dense + BM25 RRF)
+    → rerank(top_k=5)                            # Qwen3-Reranker → top_rerank_score
+    → relevance_gate                             # score >= 0.4? proceed : retry once
     → _build_context(top5)                       # numbered citation blocks
     → LLM([system] + [history 5 pairs] + [context + question])
     → AIMessage (with [1][2] citations) — streamed token-by-token via SSE
@@ -156,7 +176,7 @@ def make_nodes(oai_client: AsyncOpenAI) -> dict[str, Callable]:
     async def router_node(state: AgentState) -> dict: ...
     async def rag_node(state: AgentState) -> dict: ...
     # ... etc.
-    return {"router": router_node, "rag": rag_node, ...}
+    return {"router": router_node, "rag": rag_node, "reranker": rerank_node, "relevance_gate": relevance_gate_node, ...}
 
 # graph.py — build once, reuse for all requests
 def build_graph(oai_client: AsyncOpenAI, checkpointer=None) -> CompiledStateGraph:
@@ -181,10 +201,10 @@ async def lifespan(app: FastAPI):
 
 ```
 backend/app/agent/
-├── state.py     — AgentState TypedDict definition
-├── nodes.py     — make_nodes() factory: all 5 node implementations + helpers
+├── state.py     — AgentState TypedDict definition (+retry_count, top_rerank_score)
+├── nodes.py     — make_nodes() factory: all 6 node implementations + helpers
 ├── tools.py     — search_anime(), get_anime_details() (Qdrant-backed)
-└── graph.py     — build_graph(): StateGraph + edges + checkpointer
+└── graph.py     — build_graph(): StateGraph + edges + relevance gate loop + checkpointer
 ```
 
 ---
