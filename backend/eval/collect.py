@@ -128,6 +128,7 @@ def _doc_to_raw_payload(doc: RetrievedDoc) -> dict[str, Any]:
 # ── Paths ────────────────────────────────────────────────────────────────────
 EVAL_DIR = Path(__file__).parent
 RESULTS_DIR = EVAL_DIR / "results"
+RAW_DIR = RESULTS_DIR / "raw"
 TEST_SET_PATH = EVAL_DIR / "test_set.json"
 
 # ── System prompt (same as chain.py — reused for answer generation) ──────────
@@ -206,7 +207,6 @@ async def run_baseline(
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RAGv1 pipeline  (rewrite → filter → retrieve top-20 → rerank top-5 → generate)
-# To add RAGv2: write run_ragv2() below and add it to PIPELINE_REGISTRY.
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_ragv1(
@@ -241,15 +241,83 @@ async def run_ragv1(
     return answer, contexts, top_docs
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RAGv2 pipeline  (ragv1 + self-correcting retrieval gate)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_RELEVANCE_THRESHOLD = 0.4
+
+
+async def run_ragv2(
+    question: str,
+    oai_client: AsyncOpenAI,
+) -> tuple[str, list[str], list[RetrievedDoc]]:
+    """RAGv2: ragv1 + self-correcting retrieval gate.
+
+    Pipeline:
+        rewrite → extract_filters → retrieve(top-20, hybrid)
+        → rerank(top-5) → relevance_gate (threshold=0.4)
+        → [if fail, retry=1: retrieve(top-20, NO filter, original query) → rerank(top-5)]
+        → generate
+
+    Mirrors the production agent's relevance_gate_node behavior.
+    Returns (answer, contexts, top_docs).
+    """
+    # 1. Rewrite query
+    rewritten = await rewrite_query(question, oai_client)
+
+    # 2. Extract metadata filters
+    filter_params = await extract_filters(question, oai_client)
+    filter_kwargs = filter_params.to_dict() if not filter_params.is_empty() else None
+
+    # 3. Retrieve top-20 (hybrid: dense + BM25)
+    docs = await retrieve(rewritten, oai_client, top_k=settings.retriever_top_k, filter_kwargs=filter_kwargs)
+
+    if not docs:
+        return "I couldn't find any relevant anime for your query.", [], []
+
+    # 4. Rerank → top-5
+    doc_texts = [doc.chunk_text for doc in docs]
+    ranked = await rerank(query=rewritten, documents=doc_texts, top_k=settings.reranker_top_k)
+    top_docs = [docs[r["index"]] for r in ranked]
+
+    # 5. Relevance gate — self-correction
+    top_score = ranked[0]["relevance_score"] if ranked else 0.0
+    if top_score < _RELEVANCE_THRESHOLD:
+        logger.info(
+            "Relevance gate FAILED (score={:.4f} < {:.2f}) — retrying without filters",
+            top_score, _RELEVANCE_THRESHOLD,
+        )
+        # Retry: drop filters + use original question for maximum recall
+        docs_retry = await retrieve(
+            question, oai_client,
+            top_k=settings.retriever_top_k,
+            filter_kwargs=None,
+        )
+        if docs_retry:
+            doc_texts_retry = [doc.chunk_text for doc in docs_retry]
+            ranked_retry = await rerank(
+                query=question,
+                documents=doc_texts_retry,
+                top_k=settings.reranker_top_k,
+            )
+            top_docs = [docs_retry[r["index"]] for r in ranked_retry]
+            logger.info(
+                "Retry rerank — new top score: {:.4f}",
+                ranked_retry[0]["relevance_score"] if ranked_retry else 0.0,
+            )
+
+    # 6. Generate
+    answer = await _generate_answer(question, top_docs, oai_client)
+    contexts = [_doc_to_eval_context(doc) for doc in top_docs]
+    return answer, contexts, top_docs
+
+
 # ── Pipeline registry ─────────────────────────────────────────────────────────
-# Map pipeline name → runner coroutine.
-# To add RAGv2: implement run_ragv2() above and register it here.
-# Output file will automatically be raw_{name}.json.
-# ─────────────────────────────────────────────────────────────────────────────
 PIPELINE_REGISTRY: dict[str, Any] = {
     "baseline": run_baseline,
     "ragv1":    run_ragv1,
-    # "ragv2": run_ragv2,  ← add future versions here
+    "ragv2":    run_ragv2,
 }
 
 
@@ -313,14 +381,14 @@ async def _run_question(
 
 async def collect(pipeline: str, limit: int | None = None) -> None:
     """Run pipeline for all questions and save results incrementally."""
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     test_set: list[dict] = json.loads(TEST_SET_PATH.read_text())
     if limit:
         test_set = test_set[:limit]
         logger.info("Limited to first {} questions", limit)
 
-    out_path = RESULTS_DIR / f"raw_{pipeline}.json"
+    out_path = RAW_DIR / f"raw_{pipeline}.json"
     results: list[dict] = []
 
     # Resume support: load existing results and skip already-done IDs

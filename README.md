@@ -113,6 +113,16 @@ The QA path is the core RAG pipeline. Each node reads from and writes to a share
 | **search** | `extract_filters()` → `retrieve(top_k=20)` → `rerank(top_k=5)` | Formatted anime list |
 | **detail** | Extract title → `scroll()` by ID or `retrieve(top_k=1)` fallback | Full anime profile |
 
+### Data Ingestion Pipeline
+
+| | **1. Fetch** | **2. Chunk** | **3. Embed** | **4. Index** |
+|---|---|---|---|---|
+| **Source** | AniList GraphQL API | Structured text per anime | Dual encoding | Qdrant collection |
+| **Scale** | ~1,250 anime | title + genres + tags + synopsis + metadata | **Dense:** text-embedding-3-small (1536d, OpenAI) | 2 named vectors: `dense` + `bm25` |
+| **Details** | 39 fields each | One chunk = one anime's full structured text | **Sparse:** fastembed BM25 (Qdrant/bm25, CPU, ~5MB) | Payload: 39 filterable metadata fields |
+| **Constraint** | Rate-limited 30 req/min | — | — | — |
+| **Script** | `scripts/fetch_anilist.py` | `scripts/ingest.py` | `scripts/ingest.py` | `scripts/ingest.py` |
+
 ---
 
 ## Quick Start
@@ -228,45 +238,45 @@ Internet
 
 **Eval run v2** · 50-question test set · GPT-4o-mini as judge · Reference-free (no ground truth)
 
-| Metric | Baseline (retrieve-only) | RAGv1 (full pipeline) | Delta |
+| Metric | Baseline (retrieve-only) | RAGv1 (full pipeline) | RAGv2 (+ self-correction) |
 |---|---|---|---|
-| **Faithfulness** (RAGAS) | 0.825 | 0.804 | -0.021 |
-| **Answer Relevancy** (RAGAS) | 0.619 | 0.571 | -0.047 |
-| **FactScore** (custom) | 0.873 | 0.899 | **+0.026** |
+| **Faithfulness** (RAGAS) | 0.825 | 0.804 | 0.810 |
+| **Answer Relevancy** (RAGAS) | 0.619 | 0.571 | 0.593 |
+| **FactScore** (custom) | 0.873 | 0.899 | 0.913 |
 
 > Targets: Faithfulness ≥ 0.80 ✅ · FactScore ≥ 0.75 ✅
 >
-> Full results: [`backend/eval/results/report_v2.md`](backend/eval/results/report_v2.md) · [`scores_v2.json`](backend/eval/results/scores_v2.json)
+> Full results: [`report_ragv1.md`](backend/eval/results/reports/report_ragv1.md) · [`report_ragv2.md`](backend/eval/results/reports/report_ragv2.md)
 
 ### Pipeline Comparison
 
-| Setting | Baseline | RAGv1 |
-|---|---|---|
-| Query rewrite | ❌ | ✅ GPT-4o-mini |
-| Metadata filter | ❌ | ✅ Auto-extracted |
-| Retrieval | Top-20 dense | Top-20 hybrid (dense + BM25 RRF) |
-| Reranker | ❌ | ✅ Qwen3-Reranker → top-5 |
-| Self-correction | ❌ | ✅ Relevance gate (0.4 threshold) |
+| Setting | Baseline | RAGv1 | RAGv2 |
+|---|---|---|---|
+| Query rewrite | ❌ | ✅ GPT-4o-mini | ✅ GPT-4o-mini |
+| Metadata filter | ❌ | ✅ Auto-extracted | ✅ Auto-extracted |
+| Retrieval | Top-5 dense | Top-20 hybrid (dense + BM25 RRF) | Top-20 hybrid (dense + BM25 RRF) |
+| Reranker | ❌ | ✅ Qwen3-Reranker → top-5 | ✅ Qwen3-Reranker → top-5 |
+| Self-correction | ❌ | ❌ | ✅ Relevance gate (0.4 threshold) |
 
 ### Category Breakdown — Faithfulness
 
-| Category | Baseline | RAGv1 | Delta |
+| Category | Baseline | RAGv1 | RAGv2 |
 |---|---|---|---|
-| edge | 0.567 | 0.677 | **+0.110** |
-| factual | 0.933 | 0.850 | -0.083 |
-| filter | 0.816 | 0.966 | **+0.150** |
-| multi_turn | 0.786 | 0.530 | -0.255 |
-| semantic | 0.812 | 0.836 | +0.024 |
+| edge | 0.567 | 0.677 | 0.490 |
+| factual | 0.933 | 0.850 | 0.933 |
+| filter | 0.816 | 0.966 | 0.853 |
+| multi_turn | 0.786 | 0.530 | 0.690 |
+| semantic | 0.812 | 0.836 | 0.807 |
 
 ### Category Breakdown — FactScore
 
-| Category | Baseline | RAGv1 | Delta |
+| Category | Baseline | RAGv1 | RAGv2 |
 |---|---|---|---|
-| edge | 0.875 | 1.000 | **+0.125** |
-| factual | 0.933 | 0.950 | +0.017 |
-| filter | 0.892 | 0.877 | -0.015 |
-| multi_turn | 0.794 | 0.708 | -0.085 |
-| semantic | 0.811 | 0.889 | **+0.078** |
+| edge | 0.875 | 1.000 | 0.833 |
+| factual | 0.933 | 0.950 | 1.000 |
+| filter | 0.892 | 0.877 | 0.883 |
+| multi_turn | 0.794 | 0.708 | 0.821 |
+| semantic | 0.811 | 0.889 | 0.884 |
 
 ---
 

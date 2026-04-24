@@ -1,11 +1,11 @@
-"""FActScore subprocess wrapper — runs in the `animind` conda environment.
+"""FActScore subprocess wrapper — runs in the `factscore` conda environment.
 
 Calls factscore_runner.py via `conda run -n factscore` so the evaluation
 uses the separate factscore env (Python 3.9 + old openai SDK).
 
 Called from evaluate.py:
     from eval.factscore_eval import run_factscore
-    results = run_factscore("baseline", tag="v1")
+    results = run_factscore("baseline")
 """
 
 from __future__ import annotations
@@ -21,15 +21,16 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND_DIR))
 from app.config import settings  # noqa: E402
 
-EVAL_DIR   = Path(__file__).parent
-RESULTS_DIR = EVAL_DIR / "results"
-DB_PATH    = EVAL_DIR / "factscore_db" / "anime_kb.db"
-RUNNER     = EVAL_DIR / "factscore_runner.py"
+EVAL_DIR     = Path(__file__).parent
+RESULTS_DIR  = EVAL_DIR / "results"
+RAW_DIR      = RESULTS_DIR / "raw"
+FACTSCORE_DIR = RESULTS_DIR / "factscore"
+DB_PATH      = EVAL_DIR / "factscore_db" / "anime_kb.db"
+RUNNER       = EVAL_DIR / "factscore_runner.py"
 
 
 def run_factscore(
     pipeline: str,
-    tag: str = "v1",
     judge_model: str = "gpt-4o-mini",
     gamma: int = 0,
     retrieve_k: int = 5,
@@ -39,8 +40,7 @@ def run_factscore(
     """Run FActScore for one pipeline via subprocess in the factscore conda env.
 
     Args:
-        pipeline:    "baseline" or "current"
-        tag:         version tag for output file name
+        pipeline:    "baseline", "ragv1", or "ragv2"
         judge_model: model for LLM decompose + verify
         gamma:       length penalty (0 = disabled, paper default = 10)
         retrieve_k:  passages retrieved per atomic fact from SQLite BM25
@@ -50,11 +50,24 @@ def run_factscore(
     Returns:
         Parsed JSON dict from factscore_runner.py output, or None on failure.
     """
-    input_path  = RESULTS_DIR / f"raw_{pipeline}.json"
-    output_path = RESULTS_DIR / f"factscore_{pipeline}_{tag}.json"
+    FACTSCORE_DIR.mkdir(parents=True, exist_ok=True)
+
+    input_path  = RAW_DIR / f"raw_{pipeline}.json"
+    output_path = FACTSCORE_DIR / f"factscore_{pipeline}.json"
+
+    # Cache hit — return existing results without re-running
+    if output_path.exists():
+        logger.info("FActScore [{}] — cache hit, loading {}", pipeline, output_path)
+        data: dict = json.loads(output_path.read_text())
+        agg = data.get("aggregate", {})
+        logger.info(
+            "FActScore [{}] — n={} | mean={} (cached)",
+            pipeline, agg.get("n_evaluated"), agg.get("factscore_mean"),
+        )
+        return data
 
     if not input_path.exists():
-        logger.error("Input not found: {} — run collect.py first", input_path)
+        logger.error("Input not found: {} — run collect.py --pipeline {} first", input_path, pipeline)
         return None
 
     if not DB_PATH.exists():

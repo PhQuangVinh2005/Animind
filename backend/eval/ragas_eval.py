@@ -118,16 +118,24 @@ async def run_ragas_eval(
         metrics=[faithfulness_metric, relevancy_metric],
     )
 
-    # Extract per-sample scores
+    # Extract per-sample scores — replace NaN with 0.0 (LLM judge parse failures)
+    import math
     scores_df = result.to_pandas()
     per_question: list[dict] = []
     for i, row in scores_df.iterrows():
+        faith_val = float(row.get("faithfulness", 0.0))
+        relev_val = float(row.get("answer_relevancy", 0.0))
+        # NaN from RAGAS parse failures → treat as 0.0 for aggregation
+        if math.isnan(faith_val):
+            faith_val = 0.0
+        if math.isnan(relev_val):
+            relev_val = 0.0
         per_question.append({
             "id": valid[i]["id"],
             "question": valid[i]["question"],
             "category": valid[i].get("category", "unknown"),
-            "faithfulness": float(row.get("faithfulness", 0.0)),
-            "answer_relevancy": float(row.get("answer_relevancy", 0.0)),
+            "faithfulness": faith_val,
+            "answer_relevancy": relev_val,
         })
 
     # Aggregate by category
